@@ -1,0 +1,30 @@
+[project]
+name = "polars-list-utils"
+authors = [{ name="Travis Hammond", email="dashdeckers@gmail.com" }]
+description = "Utilities for working with List columns in Polars"
+readme = "README.md"
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Operating System :: OS Independent",
+]
+requires-python = ">= 3.10, <= 3.12"
+dependencies = [
+    "maturin >= 1.8.2",
+    "polars >= 1.23.0",
+    "numpy >= 2.2.3",
+    "matplotlib >= 3.4.0",
+]
+
+[build-system]
+build-backend = "maturin"
+requires = [
+    "maturin >= 1.0, < 2.0",
+    "polars >= 1.23.0",
+]
+
+[tool.maturin]
+module-name = "polars_list_utils._internal"

@@ -1,0 +1,50 @@
+from pathlib import Path
+from typing import Optional, Union
+
+import polars as pl
+from polars.plugins import register_plugin_function
+
+from polars_list_utils._internal import __version__ as __version__
+
+
+root_path = Path(__file__).parent
+
+
+def apply_fft(
+    expr: Union[pl.Expr, str, pl.Series],
+    sample_rate: int,
+    window: Optional[str] = None,
+    bp_min: Optional[float] = None,
+    bp_max: Optional[float] = None,
+    bp_ord: Optional[int] = None,
+    skip_fft: bool = False,
+) -> pl.Expr:
+    return register_plugin_function(
+        args=[expr],
+        kwargs={
+            "sample_rate": sample_rate,
+            "window": window,
+            "bp_min": bp_min,
+            "bp_max": bp_max,
+            "bp_ord": bp_ord,
+            "skip_fft": skip_fft,
+        },
+        plugin_path=root_path,
+        function_name="expr_fft",
+        is_elementwise=True,
+    )
+
+
+def get_freqs(
+    expr: Union[pl.Expr, str, pl.Series],
+    sample_rate: int,
+) -> pl.Expr:
+    return register_plugin_function(
+        args=[expr],
+        kwargs={
+            "sample_rate": sample_rate,
+        },
+        plugin_path=root_path,
+        function_name="expr_fft_freqs",
+        is_elementwise=True,
+    )
