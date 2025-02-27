@@ -2,8 +2,6 @@ use polars::{prelude::*, series::amortized_iter::AmortSeries};
 use pyo3_polars::{derive::polars_expr, export::polars_core::utils::align_chunks_binary};
 use serde::Deserialize;
 
-
-
 /// From the [plugin tutorial](https://marcogorelli.github.io/polars-plugins-tutorial/lists/)
 /// by Marco Gorelli:
 /// Polars Series are backed by chunked arrays.
@@ -85,7 +83,10 @@ fn expr_mean_of_range(
 
             y_inner.iter().zip(x_inner.iter()).for_each(|(y, x)| {
                 if let (Some(y), Some(x)) = (y, x) {
-                    if !x.is_nan() && !y.is_nan() && (kwargs.x_min..=kwargs.x_max).contains(&x) {
+                    if !x.is_nan()
+                        && !y.is_nan()
+                        && (kwargs.x_min..=kwargs.x_max).contains(&x)
+                    {
                         accumulator += y;
                         counter += 1;
                     }
