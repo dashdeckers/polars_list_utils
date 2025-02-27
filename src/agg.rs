@@ -13,7 +13,6 @@ pub struct AggregateListKwargs {
     aggregation: String,
 }
 
-
 /// Aggregate the elements, column-wise, of a `List[f64]` column.
 ///
 /// The function raises an Error if:
@@ -48,11 +47,14 @@ fn expr_aggregate_list_col_elementwise(
 
     let valid_aggregations = ["mean", "sum", "count"];
     if !valid_aggregations.contains(&kwargs.aggregation.as_str()) {
-        return Err(PolarsError::ComputeError(format!(
-            "Invalid aggregation method provided: {}. Must be one of [{}]",
-            kwargs.aggregation,
-            valid_aggregations.join(", "),
-        ).into()));
+        return Err(PolarsError::ComputeError(
+            format!(
+                "Invalid aggregation method provided: {}. Must be one of [{}]",
+                kwargs.aggregation,
+                valid_aggregations.join(", "),
+            )
+            .into(),
+        ));
     }
 
     let mut buckets: Vec<Option<f64>> = vec![None; kwargs.list_size];
@@ -90,10 +92,7 @@ fn expr_aggregate_list_col_elementwise(
         }
 
         // Return as Series
-        Series::new(
-            PlSmallStr::EMPTY,
-            dummy_vec.clone(),
-        )
+        Series::new(PlSmallStr::EMPTY, dummy_vec.clone())
     });
 
     let out = match kwargs.aggregation.as_str() {
@@ -125,9 +124,6 @@ fn expr_aggregate_list_col_elementwise(
             "One of the lists is shorter than the given list_size!".into(),
         ))
     } else {
-        Ok(Series::new(
-            PlSmallStr::EMPTY,
-            out,
-        ))
+        Ok(Series::new(PlSmallStr::EMPTY, out))
     }
 }
