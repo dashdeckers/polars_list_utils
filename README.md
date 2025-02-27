@@ -8,7 +8,13 @@
 - `agg` - Elementwise aggregations for List-type columns (currently sum, mean and count)
 - `feat` - Feature extraction for List-type columns, currently only mean_of_range
 
-## Installation
+## Installation (user)
+
+```bash
+uv pip install polars-list-utils
+```
+
+## Installation (developer)
 
 1) Setup your Python environment according to the pyproject.toml file
 2) Setup your Rust environment
@@ -24,11 +30,10 @@ uv run maturin develop --release
 ```bash
 uv venv
 .venv\Scripts\activate
-python .\scripts\showcase.py
+python .\scripts\showcase_fft.py
 ```
 
 ## Todo
 
-- Publish to PyPI (uv?)
 - Add more features
 - Add more tests
