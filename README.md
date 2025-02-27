@@ -5,7 +5,8 @@
 ## Features
 
 - `dsp` - Basic digital signal processing including Fast Fourier Transform (FFT), windowing, and Butterworth filtering
-- `agg` - Elementwise aggregations for List-type columns
+- `agg` - Elementwise aggregations for List-type columns (currently sum, mean and count)
+- `feat` - Feature extraction for List-type columns, currently only mean_of_range
 
 ## Installation
 
@@ -30,5 +31,4 @@ python .\scripts\showcase.py
 
 - Publish to PyPI (uv?)
 - Add more features
-    - [ ] Piecewise Mean & Relation
 - Add more tests

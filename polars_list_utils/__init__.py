@@ -66,3 +66,21 @@ def aggregate_list_col_elementwise(
         is_elementwise=False,
         returns_scalar=True,
     )
+
+
+def mean_of_range(
+    list_column_y: Union[pl.Expr, str, pl.Series],
+    list_column_x: Union[pl.Expr, str, pl.Series],
+    x_min: float,
+    x_max: float,
+) -> pl.Expr:
+    return register_plugin_function(
+        args=[list_column_y, list_column_x],
+        kwargs={
+            "x_min": x_min,
+            "x_max": x_max,
+        },
+        plugin_path=root_path,
+        function_name="expr_mean_of_range",
+        is_elementwise=True,
+    )

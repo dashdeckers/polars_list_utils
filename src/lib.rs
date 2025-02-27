@@ -1,5 +1,6 @@
 mod agg;
 mod dsp;
+mod feat;
 use {pyo3::prelude::*, pyo3_polars::PolarsAllocator};
 
 #[pymodule]
