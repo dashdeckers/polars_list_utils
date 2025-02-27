@@ -11,7 +11,7 @@ root_path = Path(__file__).parent
 
 
 def apply_fft(
-    expr: Union[pl.Expr, str, pl.Series],
+    list_column: Union[pl.Expr, str, pl.Series],
     sample_rate: int,
     window: Optional[str] = None,
     bp_min: Optional[float] = None,
@@ -20,7 +20,7 @@ def apply_fft(
     skip_fft: bool = False,
 ) -> pl.Expr:
     return register_plugin_function(
-        args=[expr],
+        args=[list_column],
         kwargs={
             "sample_rate": sample_rate,
             "window": window,
@@ -36,11 +36,11 @@ def apply_fft(
 
 
 def get_freqs(
-    expr: Union[pl.Expr, str, pl.Series],
+    list_column: Union[pl.Expr, str, pl.Series],
     sample_rate: int,
 ) -> pl.Expr:
     return register_plugin_function(
-        args=[expr],
+        args=[list_column],
         kwargs={
             "sample_rate": sample_rate,
         },
@@ -51,12 +51,12 @@ def get_freqs(
 
 
 def aggregate_list_col_elementwise(
-    expr: Union[pl.Expr, str, pl.Series],
+    list_column: Union[pl.Expr, str, pl.Series],
     list_size: int,
     aggregation: Literal["mean", "sum", "count"] = "mean",
 ) -> pl.Expr:
     return register_plugin_function(
-        args=[expr],
+        args=[list_column],
         kwargs={
             "list_size": list_size,
             "aggregation": aggregation,
