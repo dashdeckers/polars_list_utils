@@ -8,7 +8,7 @@ fn same_dtype(input_fields: &[Field]) -> PolarsResult<Field> {
 }
 
 #[derive(Deserialize)]
-pub struct AggregateListKwargs {
+struct AggregateListKwargs {
     list_size: usize,
     aggregation: String,
 }

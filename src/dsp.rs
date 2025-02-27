@@ -11,7 +11,7 @@ fn same_dtype(input_fields: &[Field]) -> PolarsResult<Field> {
 }
 
 #[derive(Deserialize)]
-pub struct ApplyFftKwargs {
+struct ApplyFftKwargs {
     sample_rate: usize,
     window: Option<String>,
     bp_min: Option<f64>,
@@ -143,7 +143,7 @@ fn expr_fft(
 }
 
 #[derive(Deserialize)]
-pub struct GetFreqsKwargs {
+struct GetFreqsKwargs {
     sample_rate: usize,
 }
 
