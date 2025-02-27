@@ -4,7 +4,8 @@
 
 ## Features
 
-- `fft` - Fast Fourier Transform
+- `dsp` - Basic digital signal processing including Fast Fourier Transform (FFT), windowing, and Butterworth filtering
+- `agg` - Elementwise aggregations for List-type columns
 
 ## Installation
 
@@ -29,6 +30,5 @@ python .\scripts\showcase.py
 
 - Publish to PyPI (uv?)
 - Add more features
-    - [ ] Aggregations
     - [ ] Piecewise Mean & Relation
 - Add more tests

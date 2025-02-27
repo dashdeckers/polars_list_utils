@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, Literal
 
 import polars as pl
 from polars.plugins import register_plugin_function
@@ -47,4 +47,22 @@ def get_freqs(
         plugin_path=root_path,
         function_name="expr_fft_freqs",
         is_elementwise=True,
+    )
+
+
+def aggregate_list_col_elementwise(
+    expr: Union[pl.Expr, str, pl.Series],
+    list_size: int,
+    aggregation: Literal["mean", "sum", "count"] = "mean",
+) -> pl.Expr:
+    return register_plugin_function(
+        args=[expr],
+        kwargs={
+            "list_size": list_size,
+            "aggregation": aggregation,
+        },
+        plugin_path=root_path,
+        function_name="expr_aggregate_list_col_elementwise",
+        is_elementwise=False,
+        returns_scalar=True,
     )
