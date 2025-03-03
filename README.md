@@ -2,6 +2,8 @@
 
 `polist` is a Python package that provides a set of utilities for working with List-type columns in Polars DataFrames.
 
+Status: Work-in-Progress!
+
 ## Features
 
 - `dsp` - Basic digital signal processing including Fast Fourier Transform (FFT), windowing, and Butterworth filtering
@@ -31,6 +33,14 @@ uv run maturin develop --release
 uv venv
 .venv\Scripts\activate
 python .\scripts\showcase_fft.py
+```
+
+5) Maybe configure Cargo to find uv Pythons. For example:
+
+```
+# .cargo/config.toml
+[env]
+PYO3_PYTHON = "C:\\Users\\travis.hammond\\AppData\\Roaming\\uv\\python\\cpython-3.12.0-windows-x86_64-none\\python.exe"
 ```
 
 ## Todo

@@ -1,11 +1,7 @@
+use crate::util::same_dtype;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
-
-fn same_dtype(input_fields: &[Field]) -> PolarsResult<Field> {
-    let field = &input_fields[0];
-    Ok(field.clone())
-}
 
 #[derive(Deserialize)]
 struct AggregateListKwargs {

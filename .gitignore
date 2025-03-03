@@ -6,4 +6,4 @@ venv
 *.so
 *.dll
 *.pyd
-
+.cargo/

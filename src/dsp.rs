@@ -1,14 +1,11 @@
+use crate::numpy::{interp, linspace};
+use crate::util::same_dtype;
 use butterworth::{Cutoff, Filter};
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use realfft::RealFftPlanner;
 use serde::Deserialize;
 use thiserror::Error;
-
-fn same_dtype(input_fields: &[Field]) -> PolarsResult<Field> {
-    let field = &input_fields[0];
-    Ok(field.clone())
-}
 
 #[derive(Deserialize)]
 struct ApplyFftKwargs {
@@ -149,10 +146,10 @@ struct GetFreqsKwargs {
 
 /// Get the frequencies corresponding to the result of the FFT.
 ///
-/// The function raises an Error if the samples column is not of type `List(Float64)`.
+/// The function raises an Error if the FFT column is not of type `List(Float64)`.
 ///
 /// ## Parameters
-/// - `samples`: The `List[f64]` column of samples to get the frequencies for.
+/// - `list_col`: The `List[f64]` column of FFT amplitudes to get the frequencies for.
 /// - `sample_rate`: The sampling rate of the samples.
 ///
 /// ## Return value
@@ -174,13 +171,128 @@ fn expr_fft_freqs(
         let ca: &Float64Chunked = s.f64().unwrap();
 
         // Collect the `List[f64]` values into a Vec<f64>
-        let samples: Vec<f64> = ca.iter().map(|val| val.unwrap_or_default()).collect();
+        let fft: Vec<f64> = ca.iter().map(|val| val.unwrap_or_default()).collect();
+
+        // Calculate the FFT frequencies and return as Series
+        Series::new(PlSmallStr::EMPTY, fft_freqs(fft.len(), kwargs.sample_rate))
+    });
+
+    Ok(out.into_series())
+}
+
+#[derive(Deserialize)]
+struct GetNormalizedFreqsKwargs {
+    max_norm_val: f64,
+}
+
+/// Get the normalized frequencies corresponding to the result of the FFT.
+///
+/// The function raises an Error if the FFT column is not of type `List(Float64)`.
+///
+/// ## Parameters
+/// - `list_col`: The `List[f64]` column of FFT amplitudes to get the frequencies for.
+/// - `max_norm_val`: The maximum value to normalize the FFT amplitudes to.
+///
+/// ## Return value
+/// New `List[f64]` column with the normalized frequencies corresponding to the result of the FFT.
+#[polars_expr(output_type_func=same_dtype)]
+fn expr_fft_normalized_freqs(
+    inputs: &[Series],
+    kwargs: GetNormalizedFreqsKwargs,
+) -> PolarsResult<Series> {
+    let ca = inputs[0].list()?;
+
+    if ca.dtype() != &DataType::List(Box::new(DataType::Float64)) {
+        let msg = format!("Expected `List(Float64)`, got: {}", ca.dtype());
+        return Err(PolarsError::ComputeError(msg.into()));
+    }
+
+    let out: ListChunked = ca.apply_amortized(|s| {
+        let s: &Series = s.as_ref();
+        let ca: &Float64Chunked = s.f64().unwrap();
+
+        // Collect the `List[f64]` values into a Vec<f64>
+        let fft: Vec<f64> = ca.iter().map(|val| val.unwrap_or_default()).collect();
 
         // Calculate the FFT frequencies and return as Series
         Series::new(
             PlSmallStr::EMPTY,
-            fft_freqs(samples.len(), kwargs.sample_rate),
+            fft_normalized_freqs(fft.len(), kwargs.max_norm_val),
         )
+    });
+
+    Ok(out.into_series())
+}
+
+#[derive(Deserialize)]
+struct NormalizeFftsKwargs {
+    max_norm_val: f64,
+}
+
+/// Normalize the result of the FFT to by some normalization column.
+///
+/// The function raises an Error if the FFT column is not of type `List(Float64)`
+/// or the normalization column is not of type `Float64`.
+///
+/// ## Parameters
+/// - `list_column`: The `List[f64]` column of FFT amplitudes to normalize.
+/// - `norm_column`: The `f64` column of values to normalize the FFT amplitudes by.
+/// - `max_norm_val`: The maximum value to normalize the FFT amplitudes to.
+///
+/// ## Return value
+/// New `List[f64]` column with the frequencies corresponding to the result of the FFT.
+#[polars_expr(output_type_func=same_dtype)]
+fn expr_normalize_ffts(
+    inputs: &[Series],
+    kwargs: NormalizeFftsKwargs,
+) -> PolarsResult<Series> {
+    let fft = inputs[0].list()?;
+    let norm_col = inputs[1].f64()?;
+    let max_norm_val = kwargs.max_norm_val;
+
+    if fft.dtype() != &DataType::List(Box::new(DataType::Float64)) {
+        let msg = format!("Expected `List(Float64)`, got: {}", fft.dtype());
+        return Err(PolarsError::ComputeError(msg.into()));
+    }
+    if norm_col.dtype() != &DataType::Float64 {
+        let msg = format!("Expected `Float64`, got: {}", norm_col.dtype());
+        return Err(PolarsError::ComputeError(msg.into()));
+    }
+
+    let out: ListChunked = fft.zip_and_apply_amortized(norm_col, |ca_fft, norm| {
+        if let (Some(ca_fft), Some(norm)) = (ca_fft, norm) {
+            let fft: &Float64Chunked = ca_fft.as_ref().f64().unwrap();
+
+            // let norm_factor = norm_col.get(0).unwrap();
+
+            println!("Norm factor: {}", norm);
+
+
+            let xp: Vec<f64> = fft
+                .iter()
+                .map(|val| {
+                    if let Some(val) = val {
+                        val / norm
+                    } else {
+                        f64::NAN
+                    }
+                })
+                .collect();
+
+            let fp: Vec<f64> = fft.iter().map(|val| val.unwrap_or(f64::NAN)).collect();
+
+            let x = fft_normalized_freqs(fp.len(), max_norm_val);
+
+            // x= fft_normalized_freqs(fft_col.len(), max_norm_val)
+            // xp= get_fft_freqs() / norm_col
+            // fp= fft_col
+
+            let interpolated = interp(&x, &xp, &fp, None, None, None);
+
+            Some(Series::new(PlSmallStr::EMPTY, interpolated))
+        } else {
+            None
+        }
     });
 
     Ok(out.into_series())
@@ -231,8 +343,8 @@ fn fft(samples: &[f64]) -> Vec<f64> {
 /// This works for "real" FFTs, that ignore the complex conjugate.
 ///
 /// ## Parameters
-/// * `samples_len` Number of samples put into the FFT
-/// * `sample_rate` sampling_rate, e.g. `44100 [Hz]`
+/// - `sample_len` Length of the FFT result, of which half is the relevant part.
+/// - `sample_rate` sampling_rate, e.g. `44100 [Hz]`
 ///
 /// ## Return value
 /// New [Vec<f64>] with the frequency values in Hertz.
@@ -251,6 +363,35 @@ fn fft_freqs(
             (i as f64) * fs / n
         })
         .collect()
+}
+
+/// Calculate the normalized frequency values corresponding to the result of [fft].
+///
+/// This works for "real" FFTs, that ignore the complex conjugate.
+///
+/// ## Parameters
+/// - `fft_len` Length of the FFT result, of which everything (!) is relevant.
+/// - `max_norm_val`: The maximum value to normalize the FFT amplitudes to.
+///
+/// ## Return value
+/// New [Vec<f64>] with the normalized frequency values in Hertz.
+///
+/// ## More info
+/// * <https://stackoverflow.com/questions/4364823/>
+#[rustfmt::skip]
+fn fft_normalized_freqs(
+    fft_len: usize,
+    max_norm_val: f64,
+) -> Vec<f64> {
+    let (samples, _) = linspace(
+        0 as f64,
+        max_norm_val,
+        fft_len,
+        true,
+        false,
+    );
+
+    samples
 }
 
 /// Applies the Hann window to an array of samples.
@@ -320,11 +461,11 @@ enum BandpassError {
 /// - Otherwise a bandpass filter is applied.
 ///
 /// ## Parameters
-/// * `samples`: Array with samples. Each value must be a regular f64 (no NaN or infinite).
-/// * `sample_rate` sampling_rate, e.g. `44100 [Hz]`
-/// * `order`: The order of the filter.
-/// * `min`: The minimum frequency let through by the bandpass filter.
-/// * `max`: The maximum frequency let through by the bandpass filter.
+/// - `samples`: Array with samples. Each value must be a regular f64 (no NaN or infinite).
+/// - `sample_rate` sampling_rate, e.g. `44100 [Hz]`
+/// - `order`: The order of the filter.
+/// - `min`: The minimum frequency let through by the bandpass filter.
+/// - `max`: The maximum frequency let through by the bandpass filter.
 ///
 /// ## Return value
 /// New [Vec<f64>] with the result of the bandpass filter applied to the sample array.
