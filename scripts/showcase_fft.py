@@ -108,13 +108,12 @@ df_plot2 = (
         polist.normalize_fft(
             'fft',
             norm_column='norm_col',
-            max_norm_val=80,
         ).alias('normalized_fft'),
     )
     .with_columns(
         polist.get_normalized_freqs(
-            'normalized_fft',
-            max_norm_val=80,
+            'fft',
+            norm_column='norm_col',
         ).alias('freqs'),
     )
 )
