@@ -7,6 +7,8 @@ use serde::Deserialize;
 struct SnippetMeanKwargs {
     x_min: f64,
     x_max: f64,
+    x_min_idx_offset: Option<usize>,
+    x_max_idx_offset: Option<usize>,
 }
 
 /// Compute the mean of a range of elements of a `List[f64]` column, where the
@@ -23,6 +25,8 @@ struct SnippetMeanKwargs {
 /// - `list_column_x`: The `List[f64]` column of samples to use as the range.
 /// - `x_min`: The minimum value of the range.
 /// - `x_max`: The maximum value of the range.
+/// - `x_min_idx_offset`: The index offset to add to the `x_min` constraint.
+/// - `x_max_idx_offset`: The index offset to subtract from the `x_max` constraint.
 ///
 /// ## Return value
 /// New `Float64` column with the mean of the elements in the range.
@@ -51,7 +55,7 @@ fn expr_mean_of_range(
             let y_inner = y_inner.as_ref().f64().unwrap();
             let x_inner = x_inner.as_ref().f64().unwrap();
 
-            let mut accumulator: f64 = 0.;
+            let mut acc_values: Vec<f64> = Vec::with_capacity(y_inner.len());
             let mut counter: usize = 0;
 
             y_inner.iter().zip(x_inner.iter()).for_each(|(y, x)| {
@@ -60,16 +64,30 @@ fn expr_mean_of_range(
                         && !y.is_nan()
                         && (kwargs.x_min..=kwargs.x_max).contains(&x)
                     {
-                        accumulator += y;
+                        acc_values.push(y);
                         counter += 1;
                     }
                 }
             });
 
-            if counter == 0 {
+            let upp_limit = acc_values.len() - kwargs.x_max_idx_offset.unwrap_or(0);
+            let low_limit = kwargs.x_min_idx_offset.unwrap_or(0);
+            let acc_values: Vec<f64> = acc_values
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, y)| {
+                    if idx >= low_limit && idx < upp_limit {
+                        Some(y)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if acc_values.is_empty() {
                 None
             } else {
-                Some(accumulator / counter as f64)
+                Some(acc_values.iter().sum::<f64>() / acc_values.len() as f64)
             }
         },
     );

@@ -104,12 +104,16 @@ def mean_of_range(
     list_column_x: Union[pl.Expr, str, pl.Series],
     x_min: float,
     x_max: float,
+    x_min_idx_offset: Optional[int] = None,
+    x_max_idx_offset: Optional[int] = None,
 ) -> pl.Expr:
     return register_plugin_function(
         args=[list_column_y, list_column_x],
         kwargs={
             "x_min": x_min,
             "x_max": x_max,
+            "x_min_idx_offset": x_min_idx_offset,
+            "x_max_idx_offset": x_max_idx_offset,
         },
         plugin_path=root_path,
         function_name="expr_mean_of_range",
