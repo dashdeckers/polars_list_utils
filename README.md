@@ -23,7 +23,7 @@ uv pip install polars-list-utils
 3) Compile:
 
 ```bash
-uv sync
+uv sync --extra dev
 uv run maturin develop --release
 ```
 
