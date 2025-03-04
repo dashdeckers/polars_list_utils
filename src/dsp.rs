@@ -1,11 +1,17 @@
-use crate::numpy::{interp, linspace};
+use crate::numpy::interp;
 use crate::util::same_dtype;
-use butterworth::{Cutoff, Filter};
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
-use realfft::RealFftPlanner;
 use serde::Deserialize;
-use thiserror::Error;
+use crate::dsp_util::{
+    fft,
+    fft_freqs,
+    fft_normalized_freqs,
+    bandpass,
+    BandpassError,
+    hanning_window,
+    hamming_window,
+};
 
 #[derive(Deserialize)]
 struct ApplyFftKwargs {
@@ -180,73 +186,6 @@ fn expr_fft_freqs(
     Ok(out.into_series())
 }
 
-/// Calculates the "real" FFT for the given input samples.
-///
-/// The first index corresponds to the DC component and the last index to
-/// the Nyquist frequency.
-///
-/// ## Parameters
-/// - `samples`: Array with samples. Each value must be a regular floating
-///   point number (no NaN or infinite) and the length must be
-///   a power of two. Otherwise, the function panics.
-///
-/// ## Return value
-/// New [Vec<f64>] of length `samples.len() / 2 + 1` with the result of the FFT.
-///
-/// ## Panics
-/// The function panics if the length of the samples is not a power of two.
-///
-/// ## More info
-/// * <https://docs.rs/realfft/3.4.0/realfft/index.html>
-fn fft(samples: &[f64]) -> Vec<f64> {
-    // Ensure the samples length is a power of two
-    let samples_len = samples.len();
-    assert!(samples_len.is_power_of_two());
-
-    // Create the FFT planner
-    // TODO: This should be cached
-    let mut real_planner = RealFftPlanner::<f64>::new();
-    let r2c = real_planner.plan_fft_forward(samples_len);
-
-    // Compute the FFT
-    let mut spectrum = r2c.make_output_vec();
-    r2c.process(&mut samples.to_owned(), &mut spectrum).unwrap();
-
-    // Take only the real part of the complex FFT output
-    // TODO: val.norm() vs abs().re()?
-    spectrum
-        .iter()
-        .map(|val| val.norm() / (samples_len as f64).sqrt())
-        .collect()
-}
-
-/// Calculate the frequency values corresponding to the result of [fft].
-///
-/// This works for "real" FFTs, that ignore the complex conjugate.
-///
-/// ## Parameters
-/// - `sample_len` Length of the FFT result, of which half is the relevant part.
-/// - `sample_rate` sampling_rate, e.g. `44100 [Hz]`
-///
-/// ## Return value
-/// New [Vec<f64>] with the frequency values in Hertz.
-///
-/// ## More info
-/// * <https://stackoverflow.com/questions/4364823/>
-#[rustfmt::skip]
-fn fft_freqs(
-    sample_len: usize,
-    sample_rate: usize,
-) -> Vec<f64> {
-    let fs = sample_rate as f64;
-    let n = sample_len as f64;
-    (0..sample_len / 2 + 1)
-        .map(|i| {
-            (i as f64) * fs / n
-        })
-        .collect()
-}
-
 /// Normalize the result of the FFT to by some normalization column.
 ///
 /// The function raises an Error if the FFT column is not of type `List(Float64)`
@@ -360,168 +299,4 @@ fn expr_fft_normalized_freqs(
     });
 
     Ok(out.into_series())
-}
-
-/// Calculate the normalized frequency values corresponding to the result of [fft].
-///
-/// This works for "real" FFTs, that ignore the complex conjugate.
-///
-/// ## Parameters
-/// - `fft_len` Length of the FFT result, of which everything (!) is relevant.
-/// - `max_norm_val`: The maximum value to normalize the FFT amplitudes to.
-///
-/// ## Return value
-/// New [Vec<f64>] with the normalized frequency values in Hertz.
-///
-/// ## More info
-/// * <https://stackoverflow.com/questions/4364823/>
-#[rustfmt::skip]
-fn fft_normalized_freqs(
-    fft_len: usize,
-    max_norm_val: f64,
-) -> Vec<f64> {
-    let (samples, _) = linspace(
-        0 as f64,
-        max_norm_val,
-        fft_len,
-        true,
-        false,
-    );
-
-    samples
-}
-
-/// Applies the Hann window to an array of samples.
-///
-/// ## Return value
-/// New [Vec<f64>] with the result of the Hann window applied to the sample array.
-///
-/// ## More info
-/// * <https://en.wikipedia.org/wiki/Window_function#Hann_and_Hamming_windows>
-#[rustfmt::skip]
-fn hanning_window(
-    samples: &[f64],
-) -> Vec<f64> {
-    let pi = std::f64::consts::PI;
-    let n = samples.len() as f64;
-    samples
-        .iter()
-        .enumerate()
-        .map(|(i, sample)| {
-            0.5 * (1.0 - (2.0 * pi * (i as f64) / n).cos()) * sample
-        })
-        .collect()
-}
-
-/// Applies a Hamming window to an array of samples.
-///
-/// ## Return value
-/// New [Vec<f64>] with the result of the Hamming window applied to the sample array.
-///
-/// ## More info
-/// * <https://en.wikipedia.org/wiki/Window_function#Hann_and_Hamming_windows>
-#[rustfmt::skip]
-fn hamming_window(
-    samples: &[f64],
-) -> Vec<f64> {
-    let pi = std::f64::consts::PI;
-    let n = samples.len() as f64;
-    samples
-        .iter()
-        .enumerate()
-        .map(|(i, sample)| {
-            0.54 - (0.46 * (2.0 * pi * (i as f64) / (n - 1.0)).cos()) * sample
-        })
-        .collect()
-}
-
-#[derive(Debug, Error)]
-enum BandpassError {
-    #[error("Minimum frequency is negative")]
-    MinNegative,
-    #[error("Maximum frequency is lower than the minimum frequency")]
-    MaxLessThanMin,
-    #[error("Maximum frequency is larger than the Nyquist frequency")]
-    MaxLargerThanNyquist,
-}
-
-/// Applies a bandpass filter to an array of samples.
-///
-/// This function applies some extra logic to handle the edge cases where the
-/// minimum frequency is zero or the maximum frequency is the Nyquist frequency:
-/// - If the minimum frequency is zero, a lowpass filter is applied. Zero is the
-///   minimum relevant frequency.
-/// - If the maximum frequency is larger than or equal to the Nyquist frequency,
-///   a highpass filter is applied. Nyquist is the maximum relevant frequency.
-/// - If both conditions are true, the samples are returned as is. No need to
-///   apply a filter at all.
-/// - Otherwise a bandpass filter is applied.
-///
-/// ## Parameters
-/// - `samples`: Array with samples. Each value must be a regular f64 (no NaN or infinite).
-/// - `sample_rate` sampling_rate, e.g. `44100 [Hz]`
-/// - `order`: The order of the filter.
-/// - `min`: The minimum frequency let through by the bandpass filter.
-/// - `max`: The maximum frequency let through by the bandpass filter.
-///
-/// ## Return value
-/// New [Vec<f64>] with the result of the bandpass filter applied to the sample array.
-///
-/// ## Panics
-/// The function panics if the min frequency is less than zero or the max frequency
-/// is lower than the min frequency or the max frequency is larger than the Nyquist
-/// frequency.
-///
-/// ## More info
-/// * <https://docs.rs/butterworth/0.1.0/butterworth/index.html>
-fn bandpass(
-    samples: &[f64],
-    sample_rate: usize,
-    order: usize,
-    min: Option<f64>,
-    max: Option<f64>,
-) -> Result<Vec<f64>, BandpassError> {
-    let nyquist = sample_rate as f64 / 2.0;
-
-    // min and max are semantically None at 0.0 and the Nyquist frequency
-    let min = min.unwrap_or(0.0);
-    let max = max.unwrap_or(nyquist);
-
-    // Ensure the min frequency is not negative
-    if min < 0.0 {
-        return Err(BandpassError::MinNegative);
-    }
-
-    // Ensure the max frequency is not lower than the min frequency
-    if max < min {
-        return Err(BandpassError::MaxLessThanMin);
-    }
-
-    // Ensure the max frequency is not larger than the Nyquist frequency
-    if max > nyquist {
-        return Err(BandpassError::MaxLargerThanNyquist);
-    }
-
-    // Set the cutoff frequencies
-    let cutoff = if min == 0. && max == nyquist {
-        return Ok(samples.to_owned());
-    } else if min == 0. {
-        Cutoff::LowPass(max)
-    } else if max == nyquist {
-        Cutoff::HighPass(min)
-    } else {
-        Cutoff::BandPass(min, max)
-    };
-
-    // Assuming the sample rate is as given, design an nth order cutoff filter.
-    let filter = Filter::new(order, sample_rate as f64, cutoff).unwrap();
-
-    // Apply a bidirectional filter to the data
-    Ok(filter.bidirectional(&samples.to_owned()).unwrap())
-
-    // // Manually specify a padding length if the default behavior of SciPy is desired
-    // filter.bidirectional_with_padding(
-    //     &samples.to_owned(),
-    //     3 * (filter.order() + 1),
-    // ).unwrap()
 }
