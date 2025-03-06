@@ -7,3 +7,4 @@ venv
 *.dll
 *.pyd
 .cargo/
+test.py
