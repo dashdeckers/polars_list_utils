@@ -32,24 +32,20 @@ df = pl.DataFrame({
         # [1.0] + [0.0] * 1023,
         # # [np.NAN] * 10,
         # [e for e in generate_sine_wave([80, 65, 40, 10], Fs, t)[:1024]],
+
+        [e for e in generate_sine_wave([1], Fs, t)[:1024]],
         [e for e in generate_sine_wave([80], Fs, t)[:1024]],
         [e for e in generate_sine_wave([65], Fs, t)[:1024]],
         [e for e in generate_sine_wave([40], Fs, t)[:1024]],
         [e for e in generate_sine_wave([10], Fs, t)[:1024]],
     ],
-    # "norm_col": [80.0, 65.0, 40.0, 10.0]
-    "norm_col": [40.0, 35.0, 20.0, 5.0]
+    "norm_col": [1.0, 80.0, 65.0, 40.0, 10.0]
+    # "norm_col": [0.5, 40.0, 35.0, 20.0, 5.0]
 })
 print(df)
 
 df_plot = (
     df
-    .with_columns(
-        polist.apply_fft(
-            list_column='signal',
-            sample_rate=Fs,
-        ).alias('fft'),
-    )
     # .with_columns(
     #     polist.apply_fft(
     #         list_column='signal',
@@ -62,6 +58,12 @@ df_plot = (
     #     ).alias('signal'),
     # )
     .with_columns(
+        polist.apply_fft(
+            list_column='signal',
+            sample_rate=Fs,
+        ).alias('fft'),
+    )
+    .with_columns(
         polist.get_freqs(
             list_column='signal',
             sample_rate=Fs,
@@ -71,12 +73,14 @@ df_plot = (
         polist.normalize_fft(
             list_column='fft',
             norm_column='norm_col',
+            max_norm_val=10,
+            sample_rate=Fs,
         ).alias('nrm_fft'),
     )
     .with_columns(
         polist.get_normalized_freqs(
             list_column='fft',
-            norm_column='norm_col',
+            max_norm_val=10,
         ).alias('nrm_freqs'),
     )
 )
@@ -89,32 +93,29 @@ print(df_plot.with_columns(
     pl.col("nrm_freqs").list.len().alias("nrm_freqs_len"),
 ).select(cs.ends_with("len")))
 
+
+fig, axs = plt.subplots(
+    nrows=3,
+    ncols=len(df_plot),
+    squeeze=False,
+    figsize=(5 * len(df_plot), 12),
+)
 for i in range(len(df_plot)):
-    fig, axs = plt.subplots(3, 1, squeeze=False)
-    axs[0][0].plot(
+    axs[0][i].plot(
         df_plot[i, 'signal'].to_numpy(),
     )
-    axs[1][0].plot(
+    axs[1][i].plot(
         df_plot[i, 'freqs'].to_numpy(),
         df_plot[i, 'fft'].to_numpy(),
     )
-    axs[2][0].plot(
+    axs[2][i].plot(
         df_plot[i, 'nrm_freqs'].to_numpy(),
         df_plot[i, 'nrm_fft'].to_numpy(),
     )
-    plt.show()
+plt.tight_layout()
+plt.show()
 
-
-
-# WHY is the 10Hz component removed from the combined signal...
-# but not from the pure 10Hz signal?
-
-# same goes for the 65Hz component, even when max=50Hz
-
-
-# check for correct scaling of the fft
-# and the realpython tutorial incase of any more gotchas
-# then do butterworth research
-# and go through the brianmcfee dsp tutorial
+# check for correct scaling of the fft (and any more gotchas)
+# butterworth research and brianmcfee dsp tutorial
 
 
