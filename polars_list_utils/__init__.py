@@ -17,6 +17,7 @@ def apply_fft(
     bp_min: Optional[float] = None,
     bp_max: Optional[float] = None,
     bp_ord: Optional[int] = None,
+    normalize_fft: bool = False,
     skip_fft: bool = False,
 ) -> pl.Expr:
     return register_plugin_function(
@@ -27,6 +28,7 @@ def apply_fft(
             "bp_min": bp_min,
             "bp_max": bp_max,
             "bp_ord": bp_ord,
+            "normalize_fft": normalize_fft,
             "skip_fft": skip_fft,
         },
         plugin_path=root_path,

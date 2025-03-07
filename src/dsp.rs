@@ -20,6 +20,7 @@ struct ApplyFftKwargs {
     bp_min: Option<f64>,
     bp_max: Option<f64>,
     bp_ord: Option<usize>,
+    normalize_fft: bool,
     skip_fft: bool,
 }
 
@@ -123,7 +124,7 @@ fn expr_fft(
             if kwargs.skip_fft {
                 samples
             } else {
-                fft(&samples)
+                fft(&samples, kwargs.normalize_fft)
             },
         )
     });

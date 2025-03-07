@@ -10,6 +10,8 @@ use realfft::RealFftPlanner;
 /// - `samples`: Array with samples. Each value must be a regular floating
 ///   point number (no NaN or infinite) and the length must be
 ///   a power of two. Otherwise, the function panics.
+/// - `normalize`: If true, the FFT result is normalized by the square root
+///   of the number of samples.
 ///
 /// ## Return value
 /// New [Vec<f64>] of length `samples.len() / 2 + 1` with the result of the FFT.
@@ -19,7 +21,10 @@ use realfft::RealFftPlanner;
 ///
 /// ## More info
 /// * <https://docs.rs/realfft/3.4.0/realfft/index.html>
-pub fn fft(samples: &[f64]) -> Vec<f64> {
+pub fn fft(
+    samples: &[f64],
+    normalize: bool,
+) -> Vec<f64> {
     // Ensure the samples length is a power of two
     let samples_len = samples.len();
     assert!(samples_len.is_power_of_two());
@@ -33,11 +38,17 @@ pub fn fft(samples: &[f64]) -> Vec<f64> {
     let mut spectrum = r2c.make_output_vec();
     r2c.process(&mut samples.to_owned(), &mut spectrum).unwrap();
 
-    // Take only the real part of the complex FFT output
-    // TODO: val.norm() vs abs().re()?
+    // Take only the real part of the complex FFT output and maybe normalize
+    let normalization_factor = {
+        if normalize {
+            (samples_len as f64).sqrt()
+        } else {
+            1.0
+        }
+    };
     spectrum
         .iter()
-        .map(|val| val.norm() / (samples_len as f64).sqrt())
+        .map(|val| val.norm() / normalization_factor)
         .collect()
 }
 
