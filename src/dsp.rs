@@ -1,17 +1,12 @@
+use crate::dsp_util::{
+    bandpass, fft, fft_freqs, fft_normalized_freqs, hamming_window, hanning_window,
+    BandpassError,
+};
 use crate::numpy::interp;
 use crate::util::same_dtype;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
-use crate::dsp_util::{
-    fft,
-    fft_freqs,
-    fft_normalized_freqs,
-    bandpass,
-    BandpassError,
-    hanning_window,
-    hamming_window,
-};
 
 #[derive(Deserialize)]
 struct ApplyFftKwargs {
@@ -187,7 +182,6 @@ fn expr_fft_freqs(
     Ok(out.into_series())
 }
 
-
 #[derive(Deserialize)]
 struct NormalizeFftKwargs {
     max_norm_val: f64,
@@ -231,25 +225,21 @@ fn expr_normalize_ffts(
     let out: ListChunked = fft.zip_and_apply_amortized(norm_col, |ca_fft, norm| {
         if let (Some(ca_fft), Some(norm)) = (ca_fft, norm) {
             let fft: Vec<f64> = ca_fft
-                .as_ref().f64().unwrap()
-                .iter().map(|val| val.unwrap_or(f64::NAN)).collect();
+                .as_ref()
+                .f64()
+                .unwrap()
+                .iter()
+                .map(|val| val.unwrap_or(f64::NAN))
+                .collect();
 
             let fft_freqs = fft_freqs(fft.len() * 2 - 1, kwargs.sample_rate);
             let nrm_freqs = fft_normalized_freqs(fft.len(), kwargs.max_norm_val);
 
-            let fft_freqs_div_norm: Vec<f64> = fft_freqs
-                .iter()
-                .map(|val| val / norm)
-                .collect();
+            let fft_freqs_div_norm: Vec<f64> =
+                fft_freqs.iter().map(|val| val / norm).collect();
 
-            let interpolated = interp(
-                &nrm_freqs,
-                &fft_freqs_div_norm,
-                &fft,
-                None,
-                None,
-                None,
-            );
+            let interpolated =
+                interp(&nrm_freqs, &fft_freqs_div_norm, &fft, None, None, None);
 
             Some(Series::new(PlSmallStr::EMPTY, interpolated))
         } else {

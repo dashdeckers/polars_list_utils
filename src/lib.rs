@@ -1,8 +1,8 @@
 mod agg;
 mod dsp;
+mod dsp_util;
 mod feat;
 mod numpy;
-mod dsp_util;
 mod util;
 use {pyo3::prelude::*, pyo3_polars::PolarsAllocator};
 

@@ -115,7 +115,3 @@ for i in range(len(df_plot)):
 plt.tight_layout()
 plt.show()
 
-# check for correct scaling of the fft (and any more gotchas)
-# butterworth research and brianmcfee dsp tutorial
-
-

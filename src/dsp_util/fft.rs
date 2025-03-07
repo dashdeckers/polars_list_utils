@@ -92,6 +92,7 @@ pub fn fft_freqs(
 ///
 /// ## More info
 /// * <https://stackoverflow.com/questions/4364823/>
+#[rustfmt::skip]
 pub fn fft_normalized_freqs(
     fft_len: usize,
     max_norm_val: f64,
