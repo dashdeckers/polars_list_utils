@@ -1,6 +1,6 @@
 use crate::dsp_util::{
-    bandpass, fft, fft_freqs, fft_normalized_freqs, hamming_window, hanning_window,
-    BandpassError,
+    BandpassError, bandpass, fft, fft_freqs, fft_normalized_freqs, hamming_window,
+    hanning_window,
 };
 use crate::numpy::interp;
 use crate::util::same_dtype;
