@@ -43,6 +43,13 @@ python .\scripts\showcase_fft.py
 PYO3_PYTHON = "C:\\Users\\travis.hammond\\AppData\\Roaming\\uv\\python\\cpython-3.12.0-windows-x86_64-none\\python.exe"
 ```
 
+6) Lint
+
+```bash
+uvx ruff check
+cargo fmt
+```
+
 ## Todo
 
 - Add more features
