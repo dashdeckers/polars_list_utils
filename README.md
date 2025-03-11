@@ -18,11 +18,12 @@ uv pip install polars-list-utils
 
 ## Installation (developer)
 
-1) Setup your Python environment according to the pyproject.toml file
-2) Setup your Rust environment
+1) Setup Python (i.e. install uv)
+2) Setup Rust (i.e. install rustup)
 3) Compile:
 
 ```bash
+uv venv
 uv sync --extra dev
 uv run maturin develop --release
 ```
@@ -30,9 +31,9 @@ uv run maturin develop --release
 4) Run:
 
 ```bash
-uv venv
 .venv\Scripts\activate
 python .\scripts\showcase_fft.py
+deactivate
 ```
 
 5) Maybe configure Cargo to find uv Pythons. For example:
