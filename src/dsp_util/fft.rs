@@ -51,7 +51,7 @@ pub fn fft(
     // Take only the real part of the complex FFT output and maybe normalize
     spectrum
         .iter()
-        .map(|val| val.norm() / normalization_factor)
+        .map(|val| val.norm() * normalization_factor)
         .collect()
 }
 
