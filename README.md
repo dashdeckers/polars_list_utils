@@ -50,7 +50,7 @@ uv run maturin develop --release
 
 ```bash
 .venv\Scripts\activate
-python .\scripts\showcase_fft.py
+python .\scripts\showcase_dsp.py
 deactivate
 ```
 
