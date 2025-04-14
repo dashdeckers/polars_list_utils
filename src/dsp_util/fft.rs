@@ -10,8 +10,9 @@ use realfft::RealFftPlanner;
 /// - `samples`: Array with samples. Each value must be a regular floating
 ///   point number (no NaN or infinite) and the length must be
 ///   a power of two. Otherwise, the function panics.
-/// - `normalize`: If true, the FFT result is normalized by the square root
-///   of the number of samples.
+/// - `normalize`: If true, normalize the spectrum so that the amplitude of the
+///   function in the time domain matches the amplitude of the spectrum in the
+///   frequency domain
 ///
 /// ## Return value
 /// New [Vec<f64>] of length `samples.len() / 2 + 1` with the result of the FFT.
@@ -38,14 +39,16 @@ pub fn fft(
     let mut spectrum = r2c.make_output_vec();
     r2c.process(&mut samples.to_owned(), &mut spectrum).unwrap();
 
-    // Take only the real part of the complex FFT output and maybe normalize
+    // Define the normalization factor for a real-valued function
     let normalization_factor = {
         if normalize {
-            (samples_len as f64).sqrt()
+            2.0 / (samples_len as f64)
         } else {
             1.0
         }
     };
+
+    // Take only the real part of the complex FFT output and maybe normalize
     spectrum
         .iter()
         .map(|val| val.norm() / normalization_factor)
