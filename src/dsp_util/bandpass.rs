@@ -11,7 +11,7 @@ pub enum BandpassError {
     MaxLargerThanNyquist,
 }
 
-/// Applies a bandpass filter to an array of samples.
+/// Applies a bandpass filter to an array of signal values.
 ///
 /// This function applies some extra logic to handle the edge cases where the
 /// minimum frequency is zero or the maximum frequency is the Nyquist frequency:
@@ -19,13 +19,14 @@ pub enum BandpassError {
 ///   minimum relevant frequency.
 /// - If the maximum frequency is larger than or equal to the Nyquist frequency,
 ///   a highpass filter is applied. Nyquist is the maximum relevant frequency.
-/// - If both conditions are true, the samples are returned as is. No need to
-///   apply a filter at all.
+/// - If both conditions are true, the signal values are returned as is. No need
+///   to apply a filter at all.
 /// - Otherwise a bandpass filter is applied.
 ///
 /// ## Parameters
-/// - `samples`: Array with samples. Each value must be a regular f64 (no NaN or infinite).
-/// - `sample_rate` sampling_rate, e.g. `44100 [Hz]`
+/// - `signal`: Array containing the discretized signal. Each value must be a
+///   regular f64 (no NaN or infinite).
+/// - `fs` sampling_rate, e.g. `44100 [Hz]`
 /// - `order`: The order of the filter.
 /// - `min`: The minimum frequency let through by the bandpass filter.
 /// - `max`: The maximum frequency let through by the bandpass filter.
@@ -36,18 +37,18 @@ pub enum BandpassError {
 /// ## Panics
 /// The function panics if the min frequency is less than zero or the max frequency
 /// is lower than the min frequency or the max frequency is larger than the Nyquist
-/// frequency.
+/// frequency. It also panics if the signal contains NaN or infinite values.
 ///
 /// ## More info
 /// * <https://docs.rs/butterworth/0.1.0/butterworth/index.html>
 pub fn bandpass(
-    samples: &[f64],
-    sample_rate: usize,
+    signal: &[f64],
+    fs: usize,
     order: usize,
     min: Option<f64>,
     max: Option<f64>,
 ) -> Result<Vec<f64>, BandpassError> {
-    let nyquist = sample_rate as f64 / 2.0;
+    let nyquist = fs as f64 / 2.0;
 
     // min and max are semantically None at 0.0 and the Nyquist frequency
     let min = min.unwrap_or(0.0);
@@ -70,7 +71,7 @@ pub fn bandpass(
 
     // Set the cutoff frequencies
     let cutoff = if min == 0. && max == nyquist {
-        return Ok(samples.to_owned());
+        return Ok(signal.to_owned());
     } else if min == 0. {
         Cutoff::LowPass(max)
     } else if max == nyquist {
@@ -80,14 +81,14 @@ pub fn bandpass(
     };
 
     // Assuming the sample rate is as given, design an nth order cutoff filter.
-    let filter = Filter::new(order, sample_rate as f64, cutoff).unwrap();
+    let filter = Filter::new(order, fs as f64, cutoff).unwrap();
 
     // Apply a bidirectional filter to the data
-    Ok(filter.bidirectional(&samples.to_owned()).unwrap())
+    Ok(filter.bidirectional(&signal.to_owned()).unwrap())
 
     // // Manually specify a padding length if the default behavior of SciPy is desired
     // filter.bidirectional_with_padding(
-    //     &samples.to_owned(),
+    //     &signal.to_owned(),
     //     3 * (filter.order() + 1),
     // ).unwrap()
 }

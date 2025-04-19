@@ -1,67 +1,50 @@
-use crate::numpy::linspace;
+use crate::dsp_util::linspace;
+use pyo3::prelude::*;
 use realfft::RealFftPlanner;
 
-/// Calculates the "real" FFT for the given input samples.
+/// Calculates the "real" FFT for the given "real-valued" input signal.
 ///
 /// The first index corresponds to the DC component and the last index to
 /// the Nyquist frequency.
 ///
 /// ## Parameters
-/// - `samples`: Array with samples. Each value must be a regular floating
-///   point number (no NaN or infinite) and the length must be
+/// - `signal`: Array containing the discretized signal. Each value must be a
+///   regular floating point number (no NaN or infinite) and the length must be
 ///   a power of two. Otherwise, the function panics.
-/// - `normalize`: If true, normalize the spectrum so that the amplitude of the
-///   function in the time domain matches the amplitude of the spectrum in the
-///   frequency domain
 ///
 /// ## Return value
-/// New [Vec<f64>] of length `samples.len() / 2 + 1` with the result of the FFT.
+/// New [Vec<f64>] of length `signal.len() / 2 + 1` with the result of the FFT.
 ///
 /// ## Panics
-/// The function panics if the length of the samples is not a power of two.
+/// The function panics if the length of the signal is not a power of two, or if
+/// the signal contains NaN or infinite values.
 ///
 /// ## More info
 /// * <https://docs.rs/realfft/3.4.0/realfft/index.html>
-pub fn fft(
-    samples: &[f64],
-    normalize: bool,
-) -> Vec<f64> {
-    // Ensure the samples length is a power of two
-    let samples_len = samples.len();
+pub fn fft(signal: &[f64]) -> Vec<f64> {
+    // Ensure the signal length is a power of two
+    let samples_len = signal.len();
     assert!(samples_len.is_power_of_two());
 
     // Create the FFT planner
-    // TODO: This should be cached
     let mut real_planner = RealFftPlanner::<f64>::new();
     let r2c = real_planner.plan_fft_forward(samples_len);
 
     // Compute the FFT
     let mut spectrum = r2c.make_output_vec();
-    r2c.process(&mut samples.to_owned(), &mut spectrum).unwrap();
+    r2c.process(&mut signal.to_owned(), &mut spectrum).unwrap();
 
-    // Define the normalization factor for a real-valued function
-    let normalization_factor = {
-        if normalize {
-            2.0 / (samples_len as f64)
-        } else {
-            1.0
-        }
-    };
-
-    // Take only the real part of the complex FFT output and maybe normalize
-    spectrum
-        .iter()
-        .map(|val| val.norm() * normalization_factor)
-        .collect()
+    // Take only the real part of the complex FFT output and maybe normalize amplitude
+    spectrum.iter().map(|val| val.norm()).collect()
 }
 
 /// Calculate the frequency values corresponding to the result of [fft].
 ///
-/// This works for "real" FFTs, that ignore the complex conjugate.
+/// This works for FFTs with "real-valued-inputs", without a complex part.
 ///
 /// ## Parameters
-/// - `sample_len` Length of the FFT result, of which half is the relevant part.
-/// - `sample_rate` sampling_rate, e.g. `44100 [Hz]`
+/// - `n`: The number of frequency bins, i.e. the length of the FFT output.
+/// - `fs`: sampling_rate, e.g. `44100 [Hz]`
 ///
 /// ## Return value
 /// New [Vec<f64>] with the frequency values in Hertz.
@@ -69,44 +52,41 @@ pub fn fft(
 /// ## More info
 /// * <https://stackoverflow.com/questions/4364823/>
 #[rustfmt::skip]
+#[pyfunction]
 pub fn fft_freqs(
-    sample_len: usize,
-    sample_rate: usize,
+    n: usize,
+    fs: usize,
 ) -> Vec<f64> {
-    let fs = sample_rate as f64;
-    let n = sample_len as f64;
-    (0..sample_len / 2 + 1)
+    let fs = fs as f64;
+    (0..n / 2 + 1)
         .map(|i| {
-            (i as f64) * fs / n
+            (i as f64) * fs / (n as f64)
         })
         .collect()
 }
 
-/// Calculate the normalized frequency values corresponding to the result of [fft].
+/// Calculate an array of evenly spaced values to interpolate to.
 ///
-/// This works for "real" FFTs, that ignore the complex conjugate.
+/// This is a thin wrapper around a `numpy.linspace` equivalent function, and
+/// generates a vector of `fnum` evenly spaced values from `0` to `fmax`. It
+/// includes the `fmax` value.
 ///
 /// ## Parameters
-/// - `fft_len` Length of the FFT result, of which everything (!) is relevant.
-/// - `max_norm_val`: The maximum value to normalize the FFT amplitudes to.
+/// - `fmax`: Last value of the array.
+/// - `fnum`: Number of values to generate.
 ///
 /// ## Return value
-/// New [Vec<f64>] with the normalized frequency values in Hertz.
-///
-/// ## More info
-/// * <https://stackoverflow.com/questions/4364823/>
+/// New [Vec<f64>] with the generated values.
 #[rustfmt::skip]
-pub fn fft_normalized_freqs(
-    fft_len: usize,
-    max_norm_val: f64,
+#[pyfunction]
+pub fn fft_freqs_linspace(
+    fnum: usize,
+    fmax: f64,
 ) -> Vec<f64> {
-    let (samples, _) = linspace(
+    linspace(
         0 as f64,
-        max_norm_val,
-        fft_len,
+        fmax,
+        fnum,
         true,
-        false,
-    );
-
-    samples
+    )
 }

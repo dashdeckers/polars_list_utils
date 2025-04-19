@@ -5,7 +5,7 @@ import polars as pl
 from polars.plugins import register_plugin_function
 
 from polars_list_utils._internal import __version__ as __version__
-
+from polars_list_utils._internal import fft_freqs, fft_freqs_linspace  # noqa: F401
 
 root_path = Path(__file__).parent
 
@@ -17,7 +17,7 @@ def apply_fft(
     bp_min: Optional[float] = None,
     bp_max: Optional[float] = None,
     bp_ord: Optional[int] = None,
-    normalize_fft: bool = False,
+    norm: Optional[str] = None,
     skip_fft: bool = False,
 ) -> pl.Expr:
     return register_plugin_function(
@@ -28,7 +28,7 @@ def apply_fft(
             "bp_min": bp_min,
             "bp_max": bp_max,
             "bp_ord": bp_ord,
-            "normalize_fft": normalize_fft,
+            "norm": norm,
             "skip_fft": skip_fft,
         },
         plugin_path=root_path,
@@ -37,50 +37,31 @@ def apply_fft(
     )
 
 
-def get_freqs(
+def operate_scalar_on_list(
     list_column: Union[pl.Expr, str, pl.Series],
-    sample_rate: int,
+    scalar_column: Union[pl.Expr, str, pl.Series],
+    operation: Literal["add", "sub", "mul", "div"],
 ) -> pl.Expr:
     return register_plugin_function(
-        args=[list_column],
+        args=[list_column, scalar_column],
         kwargs={
-            "sample_rate": sample_rate,
+            "operation": operation,
         },
         plugin_path=root_path,
-        function_name="expr_fft_freqs",
+        function_name="expr_operate_scalar_on_list",
         is_elementwise=True,
     )
 
 
-def normalize_fft(
-    list_column: Union[pl.Expr, str, pl.Series],
-    norm_column: Union[pl.Expr, str, pl.Series],
-    max_norm_val: float,
-    sample_rate: int,
+def interpolate_columns(
+    x_data: Union[pl.Expr, str, pl.Series],
+    y_data: Union[pl.Expr, str, pl.Series],
+    x_interp: Union[pl.Expr, str, pl.Series],
 ) -> pl.Expr:
     return register_plugin_function(
-        args=[list_column, norm_column],
-        kwargs={
-            "max_norm_val": max_norm_val,
-            "sample_rate": sample_rate,
-        },
+        args=[x_data, y_data, x_interp],
         plugin_path=root_path,
-        function_name="expr_normalize_ffts",
-        is_elementwise=True,
-    )
-
-
-def get_normalized_freqs(
-    list_column: Union[pl.Expr, str, pl.Series],
-    max_norm_val: float,
-) -> pl.Expr:
-    return register_plugin_function(
-        args=[list_column],
-        kwargs={
-            "max_norm_val": max_norm_val,
-        },
-        plugin_path=root_path,
-        function_name="expr_fft_normalized_freqs",
+        function_name="expr_interpolate_columns",
         is_elementwise=True,
     )
 

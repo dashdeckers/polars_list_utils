@@ -1,43 +1,37 @@
-/// Applies the Hann window to an array of samples.
+/// The Hann window function.
 ///
 /// ## Return value
-/// New [Vec<f64>] with the result of the Hann window applied to the sample array.
+/// New [Vec<f64>] with the Hann window.
 ///
 /// ## More info
 /// * <https://en.wikipedia.org/wiki/Window_function#Hann_and_Hamming_windows>
 #[rustfmt::skip]
-pub fn hanning_window(
-    samples: &[f64],
+pub fn hann_window(
+    n: usize,
 ) -> Vec<f64> {
     let pi = std::f64::consts::PI;
-    let n = samples.len() as f64;
-    samples
-        .iter()
-        .enumerate()
-        .map(|(i, sample)| {
-            0.5 * (1.0 - (2.0 * pi * (i as f64) / n).cos()) * sample
+    (0..n)
+        .map(|i| {
+            0.5 * (1.0 - (2.0 * pi * (i as f64) / (n as f64)).cos())
         })
         .collect()
 }
 
-/// Applies a Hamming window to an array of samples.
+/// The Hamming window function.
 ///
 /// ## Return value
-/// New [Vec<f64>] with the result of the Hamming window applied to the sample array.
+/// New [Vec<f64>] with the Hamming window.
 ///
 /// ## More info
 /// * <https://en.wikipedia.org/wiki/Window_function#Hann_and_Hamming_windows>
 #[rustfmt::skip]
 pub fn hamming_window(
-    samples: &[f64],
+    n: usize,
 ) -> Vec<f64> {
     let pi = std::f64::consts::PI;
-    let n = samples.len() as f64;
-    samples
-        .iter()
-        .enumerate()
-        .map(|(i, sample)| {
-            0.54 - (0.46 * (2.0 * pi * (i as f64) / (n - 1.0)).cos()) * sample
+    (0..n)
+        .map(|i| {
+            0.54 - (0.46 * (2.0 * pi * (i as f64) / ((n as f64) - 1.0)).cos())
         })
         .collect()
 }
