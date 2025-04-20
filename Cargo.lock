@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "polars-list-utils"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "butterworth",
  "interp",

@@ -39,12 +39,12 @@ fn expr_mean_of_range(
     let x = &inputs[1].list()?;
 
     if y.dtype() != &DataType::List(Box::new(DataType::Float64)) {
-        let msg = format!("Expected `List(Float64)`, got: {}", y.dtype());
+        let msg = format!("(mean_of_range): Expected `List(Float64)`, got: {}", y.dtype());
         return Err(PolarsError::ComputeError(msg.into()));
     }
 
     if x.dtype() != &DataType::List(Box::new(DataType::Float64)) {
-        let msg = format!("Expected `List(Float64)`, got: {}", x.dtype());
+        let msg = format!("(mean_of_range): Expected `List(Float64)`, got: {}", x.dtype());
         return Err(PolarsError::ComputeError(msg.into()));
     }
 

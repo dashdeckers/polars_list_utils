@@ -34,11 +34,11 @@ fn expr_operate_scalar_on_list(
     let scalar = inputs[1].f64()?;
 
     if list.dtype() != &DataType::List(Box::new(DataType::Float64)) {
-        let msg = format!("Expected `List(Float64)`, got: {}", list.dtype());
+        let msg = format!("(operate_scalar_on_list): Expected `List(Float64)`, got: {}", list.dtype());
         return Err(PolarsError::ComputeError(msg.into()));
     }
     if scalar.dtype() != &DataType::Float64 {
-        let msg = format!("Expected `Float64`, got: {}", scalar.dtype());
+        let msg = format!("(operate_scalar_on_list): Expected `Float64`, got: {}", scalar.dtype());
         return Err(PolarsError::ComputeError(msg.into()));
     }
 
@@ -46,7 +46,7 @@ fn expr_operate_scalar_on_list(
     if !valid_operations.contains(&kwargs.operation.as_str()) {
         return Err(PolarsError::ComputeError(
             format!(
-                "Invalid operation method provided: {}. Must be one of [{}]",
+                "(operate_scalar_on_list): Invalid operation method provided: {}. Must be one of [{}]",
                 kwargs.operation,
                 valid_operations.join(", "),
             )

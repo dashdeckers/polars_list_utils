@@ -55,7 +55,7 @@ fn expr_fft(
     let ca = inputs[0].list()?;
 
     if ca.dtype() != &DataType::List(Box::new(DataType::Float64)) {
-        let msg = format!("Expected `List(Float64)`, got: {}", ca.dtype());
+        let msg = format!("(apply_fft): Expected `List(Float64)`, got: {}", ca.dtype());
         return Err(PolarsError::ComputeError(msg.into()));
     }
 
@@ -152,15 +152,15 @@ fn expr_fft(
 
     if invalid_value_encountered {
         Err(PolarsError::ComputeError(
-            "Invalid value in the samples".into(),
+            "(apply_fft): Invalid value in the samples".into(),
         ))
     } else if not_a_power_of_two {
         Err(PolarsError::ComputeError(
-            "Length of the samples is not a power of two".into(),
+            "(apply_fft): Length of the samples is not a power of two".into(),
         ))
     } else if bandpass_error.is_some() {
         Err(PolarsError::ComputeError(
-            format!("{}", bandpass_error.unwrap()).into(),
+            format!("(apply_fft): {}", bandpass_error.unwrap()).into(),
         ))
     } else {
         Ok(out.into_series())

@@ -31,13 +31,13 @@ fn expr_aggregate_list_col_elementwise(
     let ca = inputs[0].list()?;
 
     if ca.dtype() != &DataType::List(Box::new(DataType::Float64)) {
-        let msg = format!("Expected `List(Float64)`, got: {}", ca.dtype());
+        let msg = format!("(aggregate_list_col_elementwise): Expected `List(Float64)`, got: {}", ca.dtype());
         return Err(PolarsError::ComputeError(msg.into()));
     }
 
     if kwargs.list_size == 0 {
         return Err(PolarsError::ComputeError(
-            "list_size must be greater than 0".into(),
+            "(aggregate_list_col_elementwise): list_size must be greater than 0".into(),
         ));
     }
 
@@ -45,7 +45,7 @@ fn expr_aggregate_list_col_elementwise(
     if !valid_aggregations.contains(&kwargs.aggregation.as_str()) {
         return Err(PolarsError::ComputeError(
             format!(
-                "Invalid aggregation method provided: {}. Must be one of [{}]",
+                "(aggregate_list_col_elementwise): Invalid aggregation method provided: {}. Must be one of [{}]",
                 kwargs.aggregation,
                 valid_aggregations.join(", "),
             )
@@ -117,7 +117,7 @@ fn expr_aggregate_list_col_elementwise(
 
     if list_too_short {
         Err(PolarsError::ComputeError(
-            "One of the lists is shorter than the given list_size!".into(),
+            "(aggregate_list_col_elementwise): One of the lists is shorter than the given list_size!".into(),
         ))
     } else {
         Ok(Series::new(PlSmallStr::EMPTY, out))
