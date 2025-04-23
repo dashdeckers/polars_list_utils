@@ -11,18 +11,14 @@ struct SnippetMeanKwargs {
     x_max_idx_offset: Option<usize>,
 }
 
-/// Compute the mean of a range of elements of a `List[f64]` column, where the
-/// range is defined by the values in another `List[f64]` column.
+/// Compute the mean of a range of elements of a `List` column, where the
+/// range is defined by the values in another `List` column.
 ///
 /// The range is inclusive of the `x_min` and `x_max` values.
 ///
-/// The function raises an Error if:
-/// * the y column is not of type `List(Float64)`
-/// * the x column is not of type `List(Float64)`
-///
 /// ## Parameters
-/// - `list_column_y`: The `List[f64]` column of samples to compute the mean of.
-/// - `list_column_x`: The `List[f64]` column of samples to use as the range.
+/// - `list_column_y`: The `List` column of samples to compute the mean of.
+/// - `list_column_x`: The `List` column of samples to use as the range.
 /// - `x_min`: The minimum value of the range.
 /// - `x_max`: The maximum value of the range.
 /// - `x_min_idx_offset`: The index offset to add to the `x_min` constraint.
@@ -35,18 +31,10 @@ fn expr_mean_of_range(
     inputs: &[Series],
     kwargs: SnippetMeanKwargs,
 ) -> PolarsResult<Series> {
-    let y = inputs[0].list()?;
-    let x = &inputs[1].list()?;
-
-    if y.dtype() != &DataType::List(Box::new(DataType::Float64)) {
-        let msg = format!("(mean_of_range): Expected `List(Float64)`, got: {}", y.dtype());
-        return Err(PolarsError::ComputeError(msg.into()));
-    }
-
-    if x.dtype() != &DataType::List(Box::new(DataType::Float64)) {
-        let msg = format!("(mean_of_range): Expected `List(Float64)`, got: {}", x.dtype());
-        return Err(PolarsError::ComputeError(msg.into()));
-    }
+    let input_y = inputs[0].cast(&DataType::List(Box::new(DataType::Float64)))?;
+    let input_x = inputs[1].cast(&DataType::List(Box::new(DataType::Float64)))?;
+    let y = input_y.list()?;
+    let x = input_x.list()?;
 
     let out: Float64Chunked = binary_amortized_elementwise(
         y,

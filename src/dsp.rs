@@ -1,5 +1,5 @@
 use crate::dsp_util::{BandpassError, bandpass, fft, hamming_window, hann_window};
-use crate::util::same_dtype;
+use crate::util::list_f64_dtype;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
@@ -15,17 +15,16 @@ struct ApplyFftKwargs {
     skip_fft: bool,
 }
 
-/// Apply the (real) Fast Fourier Transform (FFT) to a `List[f64]` column of samples.
+/// Apply the (real) Fast Fourier Transform (FFT) to a `List` column of samples.
 /// Optionally, apply a window function and/or a bandpass filter to the samples first.
 ///
 /// The function raises an Error if:
-/// * the samples column is not of type `List(Float64)`
 /// * there are invalid values in the samples (NaN or infinite)
 /// * the length of the samples is not a power of two
 /// * the bandpass arguments are incorrect (e.g. min frequency is negative, ...)
 ///
 /// ## Parameters
-/// - `samples`: The `List[f64]` column of samples to apply the FFT to.
+/// - `samples`: The `List` column of samples to apply the FFT to.
 /// - `window`: Optional window function to apply to the samples before the FFT.
 ///   Possible values are "hanning" and "hamming".
 /// - `bp_min`: Optional minimum frequency to let through the bandpass filter.
@@ -43,21 +42,17 @@ struct ApplyFftKwargs {
 ///   returned.
 ///
 /// ## Panics
-/// The function panics if there are invalid values in the `List[f64]` column.
+/// The function panics if there are invalid values in the `List` column.
 ///
 /// ## Return value
 /// New `List[f64]` column with the result of the FFT.
-#[polars_expr(output_type_func=same_dtype)]
+#[polars_expr(output_type_func=list_f64_dtype)]
 fn expr_fft(
     inputs: &[Series],
     kwargs: ApplyFftKwargs,
 ) -> PolarsResult<Series> {
-    let ca = inputs[0].list()?;
-
-    if ca.dtype() != &DataType::List(Box::new(DataType::Float64)) {
-        let msg = format!("(apply_fft): Expected `List(Float64)`, got: {}", ca.dtype());
-        return Err(PolarsError::ComputeError(msg.into()));
-    }
+    let input = inputs[0].cast(&DataType::List(Box::new(DataType::Float64)))?;
+    let ca = input.list()?;
 
     let mut invalid_value_encountered = false;
     let mut not_a_power_of_two = false;
@@ -70,7 +65,7 @@ fn expr_fft(
         let s: &Series = s.as_ref();
         let ca: &Float64Chunked = s.f64().unwrap();
 
-        // Collect the `List[f64]` values into a Vec<f64>
+        // Collect the `List` values into a Vec<f64>
         // We remember to raise an Error on invalid values
         let samples: Vec<f64> = ca
             .iter()

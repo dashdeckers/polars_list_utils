@@ -1,4 +1,4 @@
-use crate::util::same_dtype;
+use crate::util::list_f64_dtype;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
@@ -9,31 +9,26 @@ struct AggregateListKwargs {
     aggregation: String,
 }
 
-/// Aggregate the elements, column-wise, of a `List[f64]` column.
+/// Aggregate the elements, column-wise, of a `List` column.
 ///
 /// The function raises an Error if:
-/// * the samples column is not of type `List(Float64)`
 /// * the aggregation method is not one of "mean", "sum", or "count"
 /// * the list_size is 0
 /// * any of the lists in the column is shorter than list_size
 ///
 /// ## Parameters
-/// - `list_size`: The size of each list in the `List[f64]` column.
+/// - `list_size`: The size of each list in the `List` column to aggregate.
 /// - `aggregation`: The aggregation method to use. One of "mean", "sum", or "count".
 ///
 /// ## Return value
 /// New `List[f64]` column with the result of the aggregation.
-#[polars_expr(output_type_func=same_dtype)]
+#[polars_expr(output_type_func=list_f64_dtype)]
 fn expr_aggregate_list_col_elementwise(
     inputs: &[Series],
     kwargs: AggregateListKwargs,
 ) -> PolarsResult<Series> {
-    let ca = inputs[0].list()?;
-
-    if ca.dtype() != &DataType::List(Box::new(DataType::Float64)) {
-        let msg = format!("(aggregate_list_col_elementwise): Expected `List(Float64)`, got: {}", ca.dtype());
-        return Err(PolarsError::ComputeError(msg.into()));
-    }
+    let input = inputs[0].cast(&DataType::List(Box::new(DataType::Float64)))?;
+    let ca = input.list()?;
 
     if kwargs.list_size == 0 {
         return Err(PolarsError::ComputeError(

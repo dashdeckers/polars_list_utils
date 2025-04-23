@@ -1,4 +1,4 @@
-use crate::util::same_dtype;
+use crate::util::list_f64_dtype;
 use interp::{InterpMode, interp_slice};
 use polars::prelude::*;
 use pyo3_polars::{
@@ -11,36 +11,27 @@ struct OperateScalarListKwargs {
     operation: String,
 }
 
-/// Apply a scalar operation elementwise to a `List[f64]` column.
+/// Apply a scalar operation elementwise to a `List` column.
 ///
 /// The function raises an Error if:
-/// * the list column is not of type `List(Float64)`
-/// * the scalar is not of type `Float64`
 /// * the operation is not one of "add", "sub", "mul" or "div"
 ///
 /// ## Parameters
-/// - `list_columns`: The `List[f64]` column to apply the operation to.
+/// - `list_columns`: The `List` column to apply the operation to.
 /// - `scalar_column`: The `Float64` scalar to apply the operation with.
 /// - `operation`: The operation to apply. Must be one of "add", "sub", "mul" or "div".
 ///
 /// ## Return value
 /// New `List[f64]` column with the result of the operation.
-#[polars_expr(output_type_func=same_dtype)]
+#[polars_expr(output_type_func=list_f64_dtype)]
 fn expr_operate_scalar_on_list(
     inputs: &[Series],
     kwargs: OperateScalarListKwargs,
 ) -> PolarsResult<Series> {
-    let list = inputs[0].list()?;
-    let scalar = inputs[1].f64()?;
-
-    if list.dtype() != &DataType::List(Box::new(DataType::Float64)) {
-        let msg = format!("(operate_scalar_on_list): Expected `List(Float64)`, got: {}", list.dtype());
-        return Err(PolarsError::ComputeError(msg.into()));
-    }
-    if scalar.dtype() != &DataType::Float64 {
-        let msg = format!("(operate_scalar_on_list): Expected `Float64`, got: {}", scalar.dtype());
-        return Err(PolarsError::ComputeError(msg.into()));
-    }
+    let input_list = inputs[0].cast(&DataType::List(Box::new(DataType::Float64)))?;
+    let input_scalar = inputs[1].cast(&DataType::Float64)?;
+    let list = input_list.list()?;
+    let scalar = input_scalar.f64()?;
 
     let valid_operations = ["div", "mul", "add", "sub"];
     if !valid_operations.contains(&kwargs.operation.as_str()) {
@@ -88,17 +79,21 @@ fn expr_operate_scalar_on_list(
 /// Interpolate columns to obtain `y_interp` from `x_data`, `x_interp` and `y_data`.
 ///
 /// ## Parameters
-/// - `x_data`: The `List[f64]` column containing the x-coords of the data.
-/// - `y_data`: The `List[f64]` column containing the y-coords of the data.
-/// - `x_interp`: The `List[f64]` column containing the x-coords of the interpolation.
+/// - `x_data`: The `List` column containing the x-coords of the data.
+/// - `y_data`: The `List` column containing the y-coords of the data.
+/// - `x_interp`: The `List` column containing the x-coords of the interpolation.
 ///
 /// ## Return value
 /// New `List[f64]` column with the new y-coords of the interpolation, `y_interp`.
-#[polars_expr(output_type_func=same_dtype)]
+#[polars_expr(output_type_func=list_f64_dtype)]
 fn expr_interpolate_columns(inputs: &[Series]) -> PolarsResult<Series> {
-    let x_data = inputs[0].list()?;
-    let y_data = inputs[1].list()?;
-    let x_interp = inputs[2].list()?;
+    let input_x_data = inputs[0].cast(&DataType::List(Box::new(DataType::Float64)))?;
+    let input_y_data = inputs[1].cast(&DataType::List(Box::new(DataType::Float64)))?;
+    let input_x_interp = inputs[2].cast(&DataType::List(Box::new(DataType::Float64)))?;
+
+    let x_data = input_x_data.list()?;
+    let y_data = input_y_data.list()?;
+    let x_interp = input_x_interp.list()?;
 
     let (x_data, y_data, x_interp) = align_chunks_ternary(x_data, y_data, x_interp);
 
