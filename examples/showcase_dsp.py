@@ -2,6 +2,7 @@ from typing import Union
 from pathlib import Path
 
 import polars as pl
+import polars.selectors as cs
 import polars_list_utils as polist
 import numpy as np
 import matplotlib.pyplot as plt
@@ -71,7 +72,7 @@ df_plot = (
     # Compute the corresponding frequencies for the FFT amplitudes
     .with_columns(
         pl.lit(polist.fft_freqs(
-            n=N,
+            n=int(n),
             fs=Fs,
         )).alias('F')               # FFT Frequency
     )
@@ -137,6 +138,26 @@ with pl.Config(tbl_cols=-1):
 # │ 0.584503]         ┆      ┆ 0.000006]          ┆ 5.6825e…                  ┆ 100.0]             ┆                           ┆               ┆                          ┆ 5.6825e…                 │
 # └───────────────────┴──────┴────────────────────┴───────────────────────────┴────────────────────┴───────────────────────────┴───────────────┴──────────────────────────┴──────────────────────────┘
 
+print(df_plot.with_columns(
+    pl.col("F").list.len().alias("F_len"),
+    pl.col("A").list.len().alias("A_len"),
+    pl.col("F_i").list.len().alias("F_i_len"),
+    pl.col("A_i").list.len().alias("A_i_len"),
+    pl.col("S").list.len().alias("S_len"),
+).select(cs.ends_with("_len")))
+
+# ┌───────┬───────┬─────────┬─────────┬───────┐
+# │ F_len ┆ A_len ┆ F_i_len ┆ A_i_len ┆ S_len │
+# │ ---   ┆ ---   ┆ ---     ┆ ---     ┆ ---   │
+# │ u32   ┆ u32   ┆ u32     ┆ u32     ┆ u32   │
+# ╞═══════╪═══════╪═════════╪═════════╪═══════╡
+# │ 513   ┆ 513   ┆ 513     ┆ 513     ┆ 1024  │
+# │ 513   ┆ 513   ┆ 513     ┆ 513     ┆ 1024  │
+# │ 513   ┆ 513   ┆ 513     ┆ 513     ┆ 1024  │
+# │ 513   ┆ 513   ┆ 513     ┆ 513     ┆ 1024  │
+# │ 513   ┆ 513   ┆ 513     ┆ 513     ┆ 1024  │
+# │ 513   ┆ 513   ┆ 513     ┆ 513     ┆ 1024  │
+# └───────┴───────┴─────────┴─────────┴───────┘
 
 fig, axs = plt.subplots(
     nrows=3,

@@ -41,6 +41,8 @@ pub fn fft(signal: &[f64]) -> Vec<f64> {
 /// Calculate the frequency values corresponding to the result of [fft].
 ///
 /// This works for FFTs with "real-valued-inputs", without a complex part.
+/// Basically, we throw away the second half of the FFT output for you, because
+/// for real-valued inputs it is simply a mirror of the first half.
 ///
 /// ## Parameters
 /// - `n`: The number of frequency bins, i.e. the length of the FFT output.
@@ -52,15 +54,17 @@ pub fn fft(signal: &[f64]) -> Vec<f64> {
 /// ## More info
 /// * <https://stackoverflow.com/questions/4364823/>
 #[rustfmt::skip]
+#[allow(non_snake_case)]
 #[pyfunction]
 pub fn fft_freqs(
     n: usize,
     fs: usize,
 ) -> Vec<f64> {
     let fs = fs as f64;
-    (0..n / 2 + 1)
+    let N = (n - 1) * 2; // FFT output length including complex part
+    (0..n)
         .map(|i| {
-            (i as f64) * fs / (n as f64)
+            (i as f64) * fs / (N as f64)
         })
         .collect()
 }
@@ -87,6 +91,6 @@ pub fn fft_freqs_linspace(
         0 as f64,
         fmax,
         fnum,
-        true,
+        false,
     )
 }
