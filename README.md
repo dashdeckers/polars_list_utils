@@ -75,10 +75,9 @@ uv pip install polars-list-utils
 
 1) Setup Rust (i.e. install rustup)
 2) Setup Python (i.e. install uv)
-3) Compile:
+3) Setup environment and compile plugin:
 
 ```bash
-uv venv
 uv sync --extra dev
 uv run maturin develop --release
 ```
