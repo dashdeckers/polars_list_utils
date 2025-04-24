@@ -30,6 +30,10 @@ fn expr_aggregate_list_col_elementwise(
     let input = inputs[0].cast(&DataType::List(Box::new(DataType::Float64)))?;
     let ca = input.list()?;
 
+    if ca.is_empty() {
+        return Series::new(PlSmallStr::EMPTY, Vec::<Option<f64>>::new()).cast(&DataType::List(Box::new(DataType::Float64)));
+    }
+
     if kwargs.list_size == 0 {
         return Err(PolarsError::ComputeError(
             "(aggregate_list_col_elementwise): list_size must be greater than 0".into(),
