@@ -31,7 +31,8 @@ fn expr_aggregate_list_col_elementwise(
     let ca = input.list()?;
 
     if ca.is_empty() {
-        return Series::new(PlSmallStr::EMPTY, Vec::<Option<f64>>::new()).cast(&DataType::List(Box::new(DataType::Float64)));
+        return Series::new(PlSmallStr::EMPTY, Vec::<Option<f64>>::new())
+            .cast(&DataType::List(Box::new(DataType::Float64)));
     }
 
     if kwargs.list_size == 0 {

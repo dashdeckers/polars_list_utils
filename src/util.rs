@@ -8,7 +8,10 @@ pub fn same_dtype(input_fields: &[Field]) -> PolarsResult<Field> {
 }
 
 pub fn list_f64_dtype(input_fields: &[Field]) -> PolarsResult<Field> {
-    Ok(Field::new(input_fields[0].name.clone(), DataType::List(Box::new(DataType::Float64))))
+    Ok(Field::new(
+        input_fields[0].name.clone(),
+        DataType::List(Box::new(DataType::Float64)),
+    ))
 }
 
 /// From the [plugin tutorial](https://marcogorelli.github.io/polars-plugins-tutorial/lists/)
