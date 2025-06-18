@@ -120,6 +120,6 @@ fn expr_aggregate_list_col_elementwise(
             "(aggregate_list_col_elementwise): One of the lists is shorter than the given list_size!".into(),
         ))
     } else {
-        Ok(Series::new(PlSmallStr::EMPTY, out))
+        Ok(Series::new(PlSmallStr::EMPTY, out).implode()?.into())
     }
 }
