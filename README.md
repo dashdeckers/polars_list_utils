@@ -1,6 +1,6 @@
 # Polars List Utils (`polist`)
 
-`polist` is a Python package that provides a set of utilities for working with List-type columns in Polars DataFrames, especially for signal processing and feature extraction.
+[`polist`](https://github.com/dashdeckers/polars_list_utils) is a Python package that provides a set of utilities for working with List-type columns in Polars DataFrames, especially for signal processing and feature extraction.
 
 So far these utilities comprise those that I found to be missing or lacking from
 the List namespace within the Polars library while I was working on a project at
