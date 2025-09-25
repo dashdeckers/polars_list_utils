@@ -1,6 +1,10 @@
 version = 1
 revision = 1
 requires-python = ">=3.10, <=3.12"
+resolution-markers = [
+    "python_full_version >= '3.11'",
+    "python_full_version < '3.11'",
+]
 
 [[package]]
 name = "contourpy"
@@ -342,7 +346,7 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.4.0" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.0,<2.0" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=2.2.3" },
-    { name = "polars", specifier = "==1.30.0" },
+    { name = "polars", specifier = ">=1.23.0" },
 ]
 provides-extras = ["dev"]
 

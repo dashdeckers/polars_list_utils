@@ -84,23 +84,52 @@ def aggregate_list_col_elementwise(
     )
 
 
-def mean_of_range(
+def agg_of_range(
     list_column_y: Union[pl.Expr, str, pl.Series],
     list_column_x: Union[pl.Expr, str, pl.Series],
+    aggregation: Literal["mean", "median", "sum", "count", "max", "min"],
     x_min: float,
     x_max: float,
+    x_range_excluded: Optional[tuple[float, float]] = None,
     x_min_idx_offset: Optional[int] = None,
     x_max_idx_offset: Optional[int] = None,
 ) -> pl.Expr:
     return register_plugin_function(
         args=[list_column_y, list_column_x],
         kwargs={
+            "aggregation": aggregation,
             "x_min": x_min,
             "x_max": x_max,
+            "x_range_excluded": x_range_excluded,
             "x_min_idx_offset": x_min_idx_offset,
             "x_max_idx_offset": x_max_idx_offset,
         },
         plugin_path=root_path,
-        function_name="expr_mean_of_range",
+        function_name="expr_agg_of_range",
+        is_elementwise=True,
+    )
+
+
+def mean_of_range(
+    list_column_y: Union[pl.Expr, str, pl.Series],
+    list_column_x: Union[pl.Expr, str, pl.Series],
+    x_min: float,
+    x_max: float,
+    x_range_excluded: Optional[tuple[float, float]] = None,
+    x_min_idx_offset: Optional[int] = None,
+    x_max_idx_offset: Optional[int] = None,
+) -> pl.Expr:
+    return register_plugin_function(
+        args=[list_column_y, list_column_x],
+        kwargs={
+            "aggregation": "mean",
+            "x_min": x_min,
+            "x_max": x_max,
+            "x_range_excluded": x_range_excluded,
+            "x_min_idx_offset": x_min_idx_offset,
+            "x_max_idx_offset": x_max_idx_offset,
+        },
+        plugin_path=root_path,
+        function_name="expr_agg_of_range",
         is_elementwise=True,
     )
