@@ -152,6 +152,6 @@ uv run ./examples/showcase.py
 ```bash
 uvx ty check
 uvx ruff check
-cargo clippy
+cargo clippy --release -- -D warnings
 cargo fmt
 ```
