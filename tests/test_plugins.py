@@ -1,0 +1,436 @@
+"""AI DISCLAIMER: These tests are AI-generated, take with a grain of salt."""
+import math
+
+import numpy as np
+import polars as pl
+import polars.exceptions
+import pytest
+
+import polars_list_utils as polist
+
+FS = 200.0
+N = 512
+
+
+def sine(freq: float, amplitude: float = 1.0, n: int = N, fs: float = FS) -> list[float]:
+    t = np.arange(n) / fs
+    return list(amplitude * np.sin(2 * np.pi * freq * t))
+
+
+def peak_bin(freq: float, n: int = N, fs: float = FS) -> int:
+    return round(freq * n / fs)
+
+
+# ---------------------------------------------------------------- apply_fft
+
+def test_fft_amplitude_reads_peak_amplitude():
+    # On-bin tone (25 Hz = bin 64): peak amplitude is recovered exactly.
+    df = pl.DataFrame({"s": [sine(25.0, amplitude=3.0)]}).with_columns(
+        polist.apply_fft("s", sample_rate=FS, window="hann", scaling="amplitude").alias("a")
+    )
+    spectrum = df["a"][0].to_list()
+    assert len(spectrum) == N // 2 + 1
+    assert spectrum[peak_bin(25.0)] == pytest.approx(3.0, rel=1e-9)
+    assert spectrum[peak_bin(80.0)] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_fft_hann_alias_matches_hanning():
+    df = pl.DataFrame({"s": [sine(25.0)]}).with_columns(
+        polist.apply_fft("s", sample_rate=FS, window="hann", scaling="amplitude").alias("a"),
+        polist.apply_fft("s", sample_rate=FS, window="hanning", scaling="amplitude").alias("b"),
+    )
+    assert df["a"][0].to_list() == df["b"][0].to_list()
+
+
+def test_fft_power_reads_mean_square():
+    # scipy 'spectrum' convention: a tone of amplitude A reads A^2 / 2.
+    df = pl.DataFrame({"s": [sine(25.0, amplitude=2.0)]}).with_columns(
+        polist.apply_fft("s", sample_rate=FS, scaling="power").alias("p")
+    )
+    assert df["p"][0].to_list()[peak_bin(25.0)] == pytest.approx(2.0, rel=1e-9)
+
+
+def test_fft_psd_satisfies_parseval():
+    # For any signal, sum(PSD) * df == mean(x^2) exactly (no window).
+    rng = np.random.default_rng(42)
+    signal = list(rng.standard_normal(N))
+    df = pl.DataFrame({"s": [signal]}).with_columns(
+        polist.apply_fft("s", sample_rate=FS, scaling="psd").alias("psd")
+    )
+    integral = sum(df["psd"][0].to_list()) * FS / N
+    assert integral == pytest.approx(float(np.mean(np.square(signal))), rel=1e-9)
+
+
+def test_fft_non_power_of_two_yields_null():
+    df = pl.DataFrame({"s": [[1.0] * 100]}).with_columns(
+        polist.apply_fft("s", sample_rate=FS).alias("a")
+    )
+    assert df["a"][0] is None
+
+
+def test_fft_unknown_window_raises():
+    with pytest.raises(polars.exceptions.PolarsError):
+        pl.DataFrame({"s": [sine(25.0)]}).with_columns(
+            polist.apply_fft(
+                "s",
+                sample_rate=FS,
+                window="hamming",  # ty: ignore[invalid-argument-type]
+            ).alias("a")
+        )
+
+
+def test_fft_unknown_scaling_raises():
+    with pytest.raises(polars.exceptions.PolarsError):
+        pl.DataFrame({"s": [sine(25.0)]}).with_columns(
+            polist.apply_fft(
+                "s",
+                sample_rate=FS,
+                scaling="density",  # ty: ignore[invalid-argument-type]
+            ).alias("a")
+        )
+
+
+def test_fft_blackman_reads_peak_amplitude():
+    df = pl.DataFrame({"s": [sine(25.0, amplitude=3.0)]}).with_columns(
+        polist.apply_fft("s", sample_rate=FS, window="blackman", scaling="amplitude").alias("a")
+    )
+    assert df["a"][0].to_list()[peak_bin(25.0)] == pytest.approx(3.0, rel=1e-9)
+
+
+def test_fft_windowed_psd_enbw_identity():
+    # For any signal and window, psd == power / enbw_hz elementwise;
+    # the periodic hann window's ENBW is exactly 1.5 bins.
+    df = pl.DataFrame({"s": [sine(25.0)]}).with_columns(
+        polist.apply_fft("s", sample_rate=FS, window="hann", scaling="power").alias("pow"),
+        polist.apply_fft("s", sample_rate=FS, window="hann", scaling="psd").alias("psd"),
+    )
+    enbw_hz = 1.5 * FS / N
+    power, psd = df["pow"][0].to_list(), df["psd"][0].to_list()
+    assert psd == pytest.approx([p / enbw_hz for p in power], rel=1e-12)
+
+
+# -------------------------------------------------------- apply_butterworth
+
+def test_butterworth_lowpass_removes_high_tone():
+    df = pl.DataFrame(
+        {"s": [list(np.array(sine(5.0)) + np.array(sine(60.0)))]}
+    ).with_columns(
+        polist.apply_butterworth("s", sample_rate=FS, max_freq=20.0).alias("f")
+    ).with_columns(
+        polist.apply_fft("f", sample_rate=FS, window="hann", scaling="amplitude").alias("a")
+    )
+    spectrum = df["a"][0].to_list()
+    assert spectrum[peak_bin(5.0)] == pytest.approx(1.0, rel=0.05)
+    assert spectrum[peak_bin(60.0)] < 1e-3
+
+
+def test_butterworth_no_cutoffs_passes_through():
+    df = pl.DataFrame({"s": [[1.0, 2.0, 3.0]]}).with_columns(
+        polist.apply_butterworth("s", sample_rate=FS).alias("f")
+    )
+    assert df["f"][0].to_list() == [1.0, 2.0, 3.0]
+    assert df["f"].dtype == pl.List(pl.Float64)
+
+
+def test_butterworth_invalid_cutoff_raises():
+    # Cutoff at/above Nyquist is a configuration error, not a null column.
+    with pytest.raises(polars.exceptions.PolarsError):
+        pl.DataFrame({"s": [sine(5.0)]}).with_columns(
+            polist.apply_butterworth("s", sample_rate=FS, max_freq=FS / 2).alias("f")
+        )
+    with pytest.raises(polars.exceptions.PolarsError):
+        pl.DataFrame({"s": [sine(5.0)]}).with_columns(
+            polist.apply_butterworth(
+                "s", sample_rate=FS, min_freq=50.0, max_freq=10.0
+            ).alias("f")
+        )
+
+
+def test_butterworth_short_list_yields_null():
+    # 12 samples equals the order-4 reflection padding, which used to
+    # panic inside the butterworth crate; must now be a null row.
+    df = pl.DataFrame({"s": [[1.0] * 12, sine(5.0)]}).with_columns(
+        polist.apply_butterworth("s", sample_rate=FS, max_freq=20.0).alias("f")
+    )
+    assert df["f"][0] is None
+    assert df["f"][1] is not None
+
+
+def test_butterworth_bandpass_short_list_yields_null():
+    # Bandpass doubles the design order, so order 4 pads with 24 samples;
+    # a 24-sample row is exactly the panic length and must yield null.
+    df = pl.DataFrame({"s": [[1.0] * 24, sine(25.0, n=32)]}).with_columns(
+        polist.apply_butterworth(
+            "s", sample_rate=FS, min_freq=10.0, max_freq=40.0
+        ).alias("f")
+    )
+    assert df["f"][0] is None
+    assert df["f"][1] is not None
+
+
+def test_butterworth_order_zero_raises():
+    with pytest.raises(polars.exceptions.PolarsError):
+        pl.DataFrame({"s": [sine(5.0)]}).with_columns(
+            polist.apply_butterworth(
+                "s", sample_rate=FS, max_freq=20.0, filter_order=0
+            ).alias("f")
+        )
+
+
+# ------------------------------------------------------------- apply_interp
+
+def test_interp_linear():
+    df = pl.DataFrame(
+        {"x": [[0.0, 1.0, 2.0]], "y": [[0.0, 10.0, 20.0]]}
+    ).with_columns(
+        polist.apply_interp("x", "y", pl.lit([0.5, 1.5, 3.0])).alias("yp")
+    )
+    assert df["yp"][0].to_list() == pytest.approx([5.0, 15.0, 20.0])
+
+
+def test_interp_length_mismatch_raises():
+    with pytest.raises(polars.exceptions.PolarsError):
+        pl.DataFrame(
+            {"x": [[0.0, 1.0, 2.0]], "y": [[0.0, 10.0]]}
+        ).with_columns(
+            polist.apply_interp("x", "y", pl.lit([0.5])).alias("yp")
+        )
+
+
+# --------------------------------------------------------------- agg_slices
+
+@pytest.fixture
+def df_ramp() -> pl.DataFrame:
+    # values 0..10 with indices 0..10
+    ramp = [float(v) for v in range(11)]
+    return pl.DataFrame({"v": [ramp], "i": [ramp]})
+
+
+def test_agg_slices_include(df_ramp):
+    out = df_ramp.with_columns(
+        polist.agg_slices(
+            "v", "i", aggregation="mean", slices_include=[(2.0, 4.0)]
+        ).alias("agg")
+    )
+    assert out["agg"][0] == pytest.approx(3.0)
+
+
+def test_agg_slices_explicit_bounds(df_ramp):
+    out = df_ramp.with_columns(
+        polist.agg_slices(
+            "v", "i",
+            aggregation="count",
+            slices_include=[((2.0, "closed"), (4.0, "open"))],
+        ).alias("agg")
+    )
+    assert out["agg"][0] == 2.0  # indices 2 and 3
+
+
+def test_agg_slices_exclude_only(df_ramp):
+    # Exclude without include means "everything except": 0,1 and 5..10.
+    out = df_ramp.with_columns(
+        polist.agg_slices(
+            "v", "i", aggregation="count", slices_exclude=[(2.0, 4.0)]
+        ).alias("agg")
+    )
+    assert out["agg"][0] == 8.0
+
+
+def test_agg_slices_empty_selection_is_null(df_ramp):
+    out = df_ramp.with_columns(
+        polist.agg_slices(
+            "v", "i", aggregation="mean", slices_include=[(100.0, 200.0)]
+        ).alias("mean"),
+        polist.agg_slices(
+            "v", "i", aggregation="count", slices_include=[(100.0, 200.0)]
+        ).alias("cnt"),
+    )
+    assert out["mean"][0] is None
+    assert out["cnt"][0] == 0.0
+
+
+def test_agg_slices_matches_polars_vertical_semantics():
+    # The contract: aggregating a slice behaves exactly like polars'
+    # vertical aggregations over the same values (nulls skipped, NaN
+    # propagates per-kernel, ddof=1 std).
+    data = [1.0, None, float("nan"), 3.0]
+    s = pl.Series(data, dtype=pl.Float64)
+    aggs: list[polist.Aggregation] = ["mean", "median", "min", "max", "std", "count"]
+    expected = {
+        "mean": s.mean(),
+        "median": s.median(),
+        "min": s.min(),
+        "max": s.max(),
+        "std": s.std(),
+        "count": float(s.count()),
+    }
+    df = pl.DataFrame({"v": [data]}, schema={"v": pl.List(pl.Float64)})
+    out = df.with_columns(
+        polist.agg_slices(
+            "v", pl.lit([0.0, 1.0, 2.0, 3.0]), aggregation=agg
+        ).alias(agg)
+        for agg in aggs
+    )
+    for agg in aggs:
+        exp = expected[agg]
+        got = out[agg][0]
+        if exp is None:
+            assert got is None, agg
+        elif isinstance(exp, float) and math.isnan(exp):
+            assert math.isnan(got), agg
+        else:
+            assert got == pytest.approx(exp), agg
+
+
+def test_agg_slices_nulls_skipped_pairwise():
+    # A null in either list drops the pair, not the row.
+    df = pl.DataFrame(
+        {
+            "v": [[1.0, None, 3.0], [1.0, 2.0, 3.0]],
+            "i": [[0.0, 1.0, 2.0], [0.0, None, 2.0]],
+        }
+    )
+    out = df.with_columns(
+        polist.agg_slices("v", "i", aggregation="mean").alias("mean"),
+        polist.agg_slices("v", "i", aggregation="count").alias("cnt"),
+    )
+    assert out["mean"].to_list() == pytest.approx([2.0, 2.0])
+    assert out["cnt"].to_list() == [2.0, 2.0]
+
+
+def test_agg_slices_all_nan_matches_polars():
+    # All-NaN selections read NaN for min/max (not +-inf fold seeds).
+    df = pl.DataFrame({"v": [[float("nan")] * 2], "i": [[0.0, 1.0]]})
+    out = df.with_columns(
+        polist.agg_slices("v", "i", aggregation=agg).alias(agg) # ty: ignore[invalid-argument-type]
+        for agg in ["mean", "median", "min", "max", "delta"]
+    )
+    for agg in ["mean", "median", "min", "max", "delta"]:
+        assert math.isnan(out[agg][0]), agg
+
+
+def test_agg_slices_nan_indices_never_match():
+    df = pl.DataFrame({"v": [[1.0, 2.0, 3.0]], "i": [[0.0, float("nan"), 2.0]]})
+    out = df.with_columns(
+        polist.agg_slices("v", "i", aggregation="count").alias("cnt")
+    )
+    assert out["cnt"][0] == 2.0
+
+
+def test_agg_slices_length_mismatch_raises(df_ramp):
+    with pytest.raises(polars.exceptions.PolarsError):
+        df_ramp.with_columns(
+            polist.agg_slices("v", pl.lit([0.0, 1.0]), aggregation="mean").alias("agg")
+        )
+
+
+def test_agg_slices_aggregations(df_ramp):
+    out = df_ramp.with_columns(
+        polist.agg_slices("v", "i", aggregation=agg).alias(agg) # ty: ignore[invalid-argument-type]
+        for agg in ["mean", "median", "min", "max", "std", "delta", "count"]
+    )
+    assert out["mean"][0] == pytest.approx(5.0)
+    assert out["median"][0] == pytest.approx(5.0)
+    assert out["min"][0] == 0.0
+    assert out["max"][0] == 10.0
+    assert out["std"][0] == pytest.approx(float(np.std(np.arange(11), ddof=1)))
+    assert out["delta"][0] == 10.0
+    assert out["count"][0] == 11.0
+
+
+# ---------------------------------------------------------------- agg_lists
+
+def test_agg_lists_elementwise_over_groups():
+    df = pl.DataFrame(
+        {
+            "g": [1, 1, 2],
+            "v": [[1.0, None, float("nan")], [3.0, 4.0, 5.0], [7.0, 8.0, 9.0]],
+        }
+    )
+    out = (
+        df.group_by("g")
+        .agg(
+            polist.agg_lists("v", list_length=3, aggregation="mean").alias("mean"),
+            polist.agg_lists("v", list_length=3, aggregation="count").alias("cnt"),
+            polist.agg_lists("v", list_length=3, aggregation="delta").alias("delta"),
+        )
+        .sort("g")
+    )
+    mean = out["mean"][0].to_list()
+    assert mean[0] == pytest.approx(2.0)  # (1 + 3) / 2
+    assert mean[1] == pytest.approx(4.0)  # null skipped from numerator and denominator
+    assert math.isnan(mean[2])  # NaN poisons the mean
+    assert out["cnt"][0].to_list() == [2.0, 1.0, 2.0]  # count skips nulls
+    assert out["delta"][0].to_list() == [2.0, 0.0, 0.0]  # min/max skip NaN
+    assert out["mean"][1].to_list() == pytest.approx([7.0, 8.0, 9.0])
+
+
+def test_agg_lists_invalid_length_raises():
+    with pytest.raises(ValueError, match="list_length"):
+        polist.agg_lists("v", list_length=0, aggregation="mean")
+
+
+def test_agg_lists_and_agg_slices_share_missing_data_semantics():
+    # The same values with a null and a NaN, aggregated horizontally by
+    # agg_slices and vertically by agg_lists, must agree for every
+    # aggregation.
+    data = [1.0, None, float("nan"), 3.0]
+    df_h = pl.DataFrame({"v": [data]}, schema={"v": pl.List(pl.Float64)})
+    df_v = pl.DataFrame(
+        {"g": [1] * 4, "v": [[x] for x in data]},
+        schema={"g": pl.Int64, "v": pl.List(pl.Float64)},
+    )
+    for agg in ["mean", "median", "std", "min", "max", "delta", "count"]:
+        h = df_h.with_columns(
+            polist.agg_slices(
+                "v", pl.lit([0.0, 1.0, 2.0, 3.0]), aggregation=agg # ty: ignore[invalid-argument-type]
+            ).alias("r")
+        )["r"][0]
+        v = df_v.group_by("g").agg(
+            polist.agg_lists("v", list_length=1, aggregation=agg).alias("r") # ty: ignore[invalid-argument-type]
+        )["r"][0].to_list()[0]
+        if h is None or v is None:
+            assert h == v, agg
+        elif math.isnan(h) or math.isnan(v):
+            assert math.isnan(h) and math.isnan(v), agg
+        else:
+            assert h == pytest.approx(v), agg
+
+
+# ----------------------------------------------------------- null semantics
+
+def test_null_and_inner_null_rows_yield_null():
+    df = pl.DataFrame(
+        {"s": [sine(25.0), None, [1.0, None, 3.0] + [0.0] * 509]},
+        schema={"s": pl.List(pl.Float64)},
+    ).with_columns(
+        polist.apply_fft("s", sample_rate=FS, scaling="amplitude").alias("a")
+    )
+    assert df["a"][0] is not None
+    assert df["a"][1] is None
+    assert df["a"][2] is None  # inner nulls must not silently misalign
+
+
+def test_integer_lists_are_accepted():
+    df = pl.DataFrame({"x": [[0, 1, 2]], "y": [[0, 10, 20]]}).with_columns(
+        polist.apply_interp("x", "y", pl.lit([1.5])).alias("yp")
+    )
+    assert df["yp"][0].to_list() == pytest.approx([15.0])
+
+
+def test_broadcasting_literal_over_rows():
+    df = pl.DataFrame({"v": [[1.0, 2.0], [3.0, 4.0]]}).with_columns(
+        polist.agg_slices("v", pl.lit([0.0, 1.0]), aggregation="mean").alias("agg")
+    )
+    assert df["agg"].to_list() == pytest.approx([1.5, 3.5])
+
+
+@pytest.mark.parametrize("engine", ["in-memory", "streaming"])
+def test_lazy_execution_matches_eager(engine):
+    # The plugin must survive lazy/streaming execution, where it runs
+    # per-morsel and re-broadcasts the literal for every batch.
+    df = pl.DataFrame({"v": [[float(i), float(i) + 1.0] for i in range(2000)]})
+    expr = polist.agg_slices("v", pl.lit([0.0, 1.0]), aggregation="mean").alias("agg")
+    eager = df.with_columns(expr)["agg"].to_list()
+    lazy = df.lazy().with_columns(expr).collect(engine=engine).select("agg").to_series().to_list() # ty: ignore[unresolved-attribute]
+    assert lazy == pytest.approx(eager)

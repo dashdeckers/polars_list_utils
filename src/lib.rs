@@ -1,10 +1,13 @@
-mod agg;
-mod dsp;
-mod dsp_util;
-mod feat;
-mod op;
+mod agg_slices;
+mod apply_butterworth;
+mod apply_fft;
+mod apply_interp;
+mod filter;
+mod slice;
+mod statistic;
+mod transform;
 mod util;
-use dsp_util::{fft_freqs, fft_freqs_linspace};
+
 use {pyo3::prelude::*, pyo3_polars::PolarsAllocator};
 
 #[global_allocator]
@@ -16,7 +19,5 @@ fn _internal(
     m: &Bound<PyModule>,
 ) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    m.add_function(wrap_pyfunction!(fft_freqs, m)?)?;
-    m.add_function(wrap_pyfunction!(fft_freqs_linspace, m)?)?;
     Ok(())
 }
