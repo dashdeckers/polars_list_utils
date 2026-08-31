@@ -1,6 +1,6 @@
 [package]
 name = "polars-list-utils"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 
 [lib]
@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.26", features = ["extension-module", "abi3-py310"] }
 pyo3-polars = { version = "0.25", features = ["derive"] }
-polars = { version = "0.52", default-features = false }
+polars = { version = "0.52", default-features = false, features = ["dtype-array"] }
 serde = { version = "1", features = ["derive"] }
 realfft = "3.4.0"
 butterworth = "0.1.0"
