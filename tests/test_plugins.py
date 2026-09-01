@@ -249,14 +249,38 @@ def test_agg_slices_empty_selection_is_null(df_ramp):
     assert out["cnt"][0] == 0.0
 
 
+def test_agg_slices_empty_selection_sum_is_positive_zero(df_ramp):
+    # Sum's empty identity is +0.0 (polars itself is split between
+    # +0.0 for Series.sum and -0.0 for list.sum of an empty list).
+    out = df_ramp.with_columns(
+        polist.agg_slices(
+            "v", "i", aggregation="sum", slices_include=[(100.0, 200.0)]
+        ).alias("s")
+    )
+    assert out["s"][0] == 0.0
+    assert math.copysign(1.0, out["s"][0]) == 1.0
+
+
+def test_agg_slices_all_null_selection_sums_to_zero():
+    df = pl.DataFrame(
+        {"v": [[None, None]], "i": [[0.0, 1.0]]},
+        schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
+    )
+    out = df.with_columns(
+        polist.agg_slices("v", "i", aggregation="sum").alias("s")
+    )
+    assert out["s"][0] == 0.0
+
+
 def test_agg_slices_matches_polars_vertical_semantics():
     # The contract: aggregating a slice behaves exactly like polars'
     # vertical aggregations over the same values (nulls skipped, NaN
     # propagates per-kernel, ddof=1 std).
     data = [1.0, None, float("nan"), 3.0]
     s = pl.Series(data, dtype=pl.Float64)
-    aggs: list[polist.Aggregation] = ["mean", "median", "min", "max", "std", "count"]
+    aggs: list[polist.Aggregation] = ["sum", "mean", "median", "min", "max", "std", "count"]
     expected = {
+        "sum": s.sum(),
         "mean": s.mean(),
         "median": s.median(),
         "min": s.min(),
@@ -303,9 +327,9 @@ def test_agg_slices_all_nan_matches_polars():
     df = pl.DataFrame({"v": [[float("nan")] * 2], "i": [[0.0, 1.0]]})
     out = df.with_columns(
         polist.agg_slices("v", "i", aggregation=agg).alias(agg) # ty: ignore[invalid-argument-type]
-        for agg in ["mean", "median", "min", "max", "delta"]
+        for agg in ["sum", "mean", "median", "min", "max", "delta"]
     )
-    for agg in ["mean", "median", "min", "max", "delta"]:
+    for agg in ["sum", "mean", "median", "min", "max", "delta"]:
         assert math.isnan(out[agg][0]), agg
 
 
@@ -327,8 +351,9 @@ def test_agg_slices_length_mismatch_raises(df_ramp):
 def test_agg_slices_aggregations(df_ramp):
     out = df_ramp.with_columns(
         polist.agg_slices("v", "i", aggregation=agg).alias(agg) # ty: ignore[invalid-argument-type]
-        for agg in ["mean", "median", "min", "max", "std", "delta", "count"]
+        for agg in ["sum", "mean", "median", "min", "max", "std", "delta", "count"]
     )
+    assert out["sum"][0] == pytest.approx(55.0)
     assert out["mean"][0] == pytest.approx(5.0)
     assert out["median"][0] == pytest.approx(5.0)
     assert out["min"][0] == 0.0
@@ -365,6 +390,18 @@ def test_agg_lists_elementwise_over_groups():
     assert out["mean"][1].to_list() == pytest.approx([7.0, 8.0, 9.0])
 
 
+def test_agg_lists_sum_of_all_null_position_is_zero():
+    # Vertical sum over an all-null position is polars' identity, 0.0.
+    df = pl.DataFrame(
+        {"g": [1, 1], "v": [[1.0, None], [2.0, None]]},
+        schema={"g": pl.Int64, "v": pl.List(pl.Float64)},
+    )
+    out = df.group_by("g").agg(
+        polist.agg_lists("v", list_length=2, aggregation="sum").alias("s")
+    )
+    assert out["s"][0].to_list() == [3.0, 0.0]
+
+
 def test_agg_lists_invalid_length_raises():
     with pytest.raises(ValueError, match="list_length"):
         polist.agg_lists("v", list_length=0, aggregation="mean")
@@ -380,7 +417,7 @@ def test_agg_lists_and_agg_slices_share_missing_data_semantics():
         {"g": [1] * 4, "v": [[x] for x in data]},
         schema={"g": pl.Int64, "v": pl.List(pl.Float64)},
     )
-    for agg in ["mean", "median", "std", "min", "max", "delta", "count"]:
+    for agg in ["sum", "mean", "median", "std", "min", "max", "delta", "count"]:
         h = df_h.with_columns(
             polist.agg_slices(
                 "v", pl.lit([0.0, 1.0, 2.0, 3.0]), aggregation=agg # ty: ignore[invalid-argument-type]

@@ -37,14 +37,14 @@ fn apply_butterworth(
         (Some(lo), None) => Filter::Highpass(lo),
         (None, Some(hi)) => Filter::Lowpass(hi),
         (None, None) => {
-            return apply_list_transform(inputs, |cols| Ok(Some(cols[0].to_vec())));
+            return apply_list_transform(inputs, |_row, cols| Ok(Some(cols[0].to_vec())));
         }
     };
     let order = kwargs.filter_order.unwrap_or(4);
     let built = filter.build(kwargs.sample_rate, order)?;
     let min_samples = filter.min_samples(order);
 
-    apply_list_transform(inputs, move |cols| {
+    apply_list_transform(inputs, move |_row, cols| {
         if cols[0].len() < min_samples {
             return Ok(None);
         }

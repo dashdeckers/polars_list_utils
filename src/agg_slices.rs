@@ -1,38 +1,9 @@
 use crate::slice::{Range, Slice};
-use crate::statistic::Statistic;
+use crate::statistic::Aggregation;
 use crate::util::ListInputs;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Aggregation {
-    Mean,
-    Median,
-    Min,
-    Max,
-    Std,
-    Delta,
-    Count,
-}
-
-impl Aggregation {
-    fn apply(
-        &self,
-        values: &[f64],
-    ) -> Option<f64> {
-        match self {
-            Self::Mean => values.mean(),
-            Self::Median => values.median(),
-            Self::Min => values.min(),
-            Self::Max => values.max(),
-            Self::Std => values.std(),
-            Self::Delta => values.delta(),
-            Self::Count => Some(values.len() as f64),
-        }
-    }
-}
 
 #[derive(Deserialize)]
 struct AggSlicesKwargs {
@@ -47,7 +18,8 @@ struct AggSlicesKwargs {
 /// Missing data follows the polars convention: null elements are
 /// skipped (pairwise with their index), while NaN is a legitimate
 /// float value that flows into the aggregation. An empty selection
-/// yields null (`count`: 0). NaN indices never match any range.
+/// yields null (`count`: 0, `sum`: 0.0). NaN indices never match any
+/// range.
 #[polars_expr(output_type=Float64)]
 fn agg_slices(
     inputs: &[Series],
@@ -76,7 +48,8 @@ fn agg_slices(
 
             // Polars missing-data convention: null elements are skipped
             // (pairwise with their index), NaN values flow through. The
-            // aggregations turn an empty selection into None (count: 0).
+            // aggregations turn an empty selection into None (count: 0,
+            // sum: 0.0).
             let selected = values
                 .iter()
                 .zip(indices)

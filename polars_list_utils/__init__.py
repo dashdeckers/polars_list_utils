@@ -1,6 +1,6 @@
 """Polars expression plugins for signal processing on List columns.
 
-Four Rust plugins operating elementwise on `List[f64]` columns, plus
+Six Rust plugins operating elementwise on `List[f64]` columns, plus
 one pure-polars helper:
 
 - :func:`apply_interp`: interpolate (x, y) data onto new x coordinates.
@@ -8,14 +8,25 @@ one pure-polars helper:
 - :func:`apply_fft`: one-sided FFT with standard windowing and scaling.
 - :func:`agg_slices`: aggregate values selected by index-column ranges.
 - :func:`agg_lists`: aggregate list columns elementwise over rows.
+- :func:`zip_binary`: element-wise binary ops between two list columns.
+- :func:`cum_agg_runs`: cumulative aggregation within gated runs.
 
 The plugins accept length-1 literal list columns (e.g. `pl.lit(...)`)
-for any input and broadcast them. Null rows and empty lists produce null
-output rows. The three transforms also null rows whose lists contain
-null elements (a signal with missing samples cannot be transformed);
-the two aggregations instead skip missing data polars-style.
+for any input and broadcast them. Null rows produce null output rows.
+
+Missing data follows three deliberate family regimes:
+
+- Transforms (`apply_interp`, `apply_butterworth`, `apply_fft`) null
+  out rows whose lists are empty or contain null elements (a signal
+  with missing samples cannot be transformed).
+- Aggregations (`agg_slices`, `agg_lists`) skip missing data
+  polars-style; NaN is a legitimate float and flows through.
+- `zip_binary` and `cum_agg_runs` mirror polars' scalar and `cum_*`
+  operations per element: nulls propagate per those ops' rules, and
+  empty lists are valid (empty in, empty out).
 """
 
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -28,7 +39,10 @@ from polars_list_utils._internal import __version__ as __version__
 IntoExprColumn = str | pl.Expr | pl.Series
 Window = Literal["hann", "hanning", "blackman"]
 Scaling = Literal["amplitude", "power", "psd"]
-Aggregation = Literal["mean", "median", "std", "min", "max", "delta", "count"]
+Aggregation = Literal["sum", "mean", "median", "std", "min", "max", "delta", "count"]
+BinaryOp = Literal[
+    "add", "sub", "mul", "div", "and", "or", "gt", "ge", "lt", "le", "eq", "ne"
+]
 
 RangeBound = tuple[float, Literal["closed", "open"]]
 Range = tuple[float, float] | tuple[RangeBound, RangeBound]
@@ -39,6 +53,7 @@ _LIB = Path(__file__).parent
 
 __all__ = [
     "Aggregation",
+    "BinaryOp",
     "IntoExprColumn",
     "Range",
     "RangeBound",
@@ -49,7 +64,9 @@ __all__ = [
     "apply_butterworth",
     "apply_fft",
     "apply_interp",
+    "cum_agg_runs",
     "polars_func_arg_into_col_expr",
+    "zip_binary",
 ]
 
 
@@ -80,6 +97,8 @@ def apply_interp(
     x_column: IntoExprColumn,
     y_column: IntoExprColumn,
     xp_column: IntoExprColumn,
+    *,
+    strict: bool = False,
 ) -> pl.Expr:
     """Interpolate `(x, y)` data onto the `xp` coordinates.
 
@@ -87,12 +106,18 @@ def apply_interp(
     values outside the data range clamped to the first/last `y` value.
     `x` must be sorted in increasing order.
 
+    With `strict=True` a row whose `x` values are not non-decreasing
+    raises (duplicates stay legal, as in numpy; a NaN in `x` counts as
+    a violation). The default keeps numpy's silent behaviour: unsorted
+    `x` interpolates garbage without complaint.
+
     Returns a `List[f64]` column of interpolated y values, one per
     `xp` coordinate. Raises if x and y lists differ in length.
     """
     return _plugin(
         "apply_interp",
         [x_column, y_column, xp_column],
+        strict=strict,
     )
 
 
@@ -158,6 +183,19 @@ def apply_fft(
     )
 
 
+def _validate_ranges(ranges: list[Range] | None, param: str) -> None:
+    """Raise on inverted or NaN range bounds (agg_slices strict=True)."""
+    for r in ranges or []:
+        lo, hi = r
+        lo_value = float(lo[0]) if isinstance(lo, tuple) else float(lo)
+        hi_value = float(hi[0]) if isinstance(hi, tuple) else float(hi)
+        if math.isnan(lo_value) or math.isnan(hi_value) or lo_value > hi_value:
+            raise ValueError(
+                f"agg_slices: invalid range {r!r} in {param} (strict=True): "
+                "bounds must be non-NaN with lo <= hi"
+            )
+
+
 def agg_slices(
     value_column: IntoExprColumn,
     index_column: IntoExprColumn,
@@ -165,6 +203,7 @@ def agg_slices(
     aggregation: Aggregation,
     slices_include: list[Range] | None = None,
     slices_exclude: list[Range] | None = None,
+    strict: bool = False,
 ) -> pl.Expr:
     """Aggregate values whose paired index falls within the given ranges.
 
@@ -176,14 +215,22 @@ def agg_slices(
     Missing data follows the polars convention, so results match
     polars' vertical aggregations over the same values: null elements
     are skipped (pairwise with their index), while NaN is a legitimate
-    float value — it poisons `mean`/`std`, is skipped by
+    float value — it poisons `sum`/`mean`/`std`, is skipped by
     `min`/`max` unless all values are NaN, and sorts as the largest
-    value for `median`. An empty selection yields null (`count`: 0).
-    NaN indices never match any range; mismatched list lengths raise.
+    value for `median`. An empty selection yields null (`count`: 0,
+    `sum`: 0.0). NaN indices never match any range; mismatched list
+    lengths raise.
 
     `std` is the sample standard deviation (ddof=1, polars' default)
     and yields null for selections with fewer than two values.
+
+    With `strict=True`, inverted (`lo > hi`) or NaN range bounds raise
+    at expression construction; the default keeps them as legitimately
+    empty selections.
     """
+    if strict:
+        _validate_ranges(slices_include, "slices_include")
+        _validate_ranges(slices_exclude, "slices_exclude")
     return _plugin(
         "agg_slices",
         [value_column, index_column],
@@ -194,6 +241,7 @@ def agg_slices(
 
 
 _AGGS: dict[str, Callable[[pl.Expr], pl.Expr]] = {
+    "sum": pl.Expr.sum,
     "mean": pl.Expr.mean,
     "median": pl.Expr.median,
     "std": pl.Expr.std,
@@ -209,6 +257,7 @@ def agg_lists(
     *,
     list_length: int,
     aggregation: Aggregation,
+    strict: bool = False,
 ) -> pl.Expr:
     """Aggregate a list-type column elementwise over rows.
 
@@ -218,19 +267,98 @@ def agg_lists(
     group. Lists shorter than `list_length` contribute nulls at the
     missing positions.
 
+    Lists longer than `list_length` are silently truncated to it — a
+    deliberate window for some callers. With `strict=True` such rows
+    raise instead.
+
     Implemented in pure polars (no plugin), so missing data follows the
     polars convention exactly as in :func:`agg_slices`: null elements
-    are skipped (`count` counts non-null values), NaN propagates
-    per-kernel, and `std` is the sample standard deviation (ddof=1).
+    are skipped (`count` counts non-null values, an all-null position
+    sums to 0.0), NaN propagates per-kernel, and `std` is the sample
+    standard deviation (ddof=1).
     """
     if list_length < 1:
         raise ValueError(f"list_length must be at least 1, got {list_length}")
+    col = polars_func_arg_into_col_expr(list_column)
+    if strict:
+        # Pure polars cannot raise from inside an expression, so the
+        # length check rides along as an elementwise pass-through plugin.
+        col = _plugin("check_list_len", [col], list_length=list_length)
     agg = _AGGS[aggregation]
     return pl.concat_list(
-        agg(
-            polars_func_arg_into_col_expr(list_column)
-            .list.slice(offset=n, length=1)
-            .list.first()
-        )
+        agg(col.list.slice(offset=n, length=1).list.first())
         for n in range(list_length)
+    )
+
+
+def zip_binary(
+    left_column: IntoExprColumn,
+    right_column: IntoExprColumn,
+    *,
+    op: BinaryOp,
+) -> pl.Expr:
+    """Apply a binary operation element-wise between two list columns.
+
+    Per element the result is identical to the corresponding scalar
+    polars op:
+
+    - Arithmetic (`add`, `sub`, `mul`, `div`) takes float lists; null
+      propagates, NaN follows IEEE float arithmetic (`1/0` is inf,
+      `0/0` is NaN). The output inner dtype follows polars supertyping:
+      `Float32` when both inputs are `Float32`, else `Float64`.
+    - `and`/`or` take Boolean lists and follow Kleene logic
+      (`False & null = False`, `True | null = True`).
+    - Comparisons (`gt`, `ge`, `lt`, `le`, `eq`, `ne`) take float lists
+      and emit Boolean, following polars' total order: NaN equals NaN
+      and exceeds everything else; comparing against null yields null.
+
+    Integer inner dtypes raise. A null row on either side yields a null
+    row; empty lists zip to empty lists; mismatched list lengths raise.
+    Length-1 literal lists broadcast (zip against a constant template).
+    """
+    return _plugin(
+        "zip_binary",
+        [left_column, right_column],
+        op=op,
+    )
+
+
+def cum_agg_runs(
+    value_column: IntoExprColumn,
+    gate_column: IntoExprColumn,
+    *,
+    aggregation: Aggregation,
+    outside: Literal["null", "zero"] = "null",
+) -> pl.Expr:
+    """Cumulatively aggregate list values within gated runs.
+
+    A run is a maximal region of constant `gate_column` value (`True`,
+    `False`, and null are distinct, so a null gate element breaks
+    runs). Only `True`-gated elements accumulate; every other position
+    emits the `outside` fill (`"null"`, or `"zero"` for a plain 0 in
+    the output dtype). Within a run, each emitted element equals the
+    vertical `aggregation` over the run's elements so far — so with an
+    all-`True` gate, `sum`/`min`/`max`/`count` match polars'
+    `cum_sum`/`cum_min`/`cum_max`/`cum_count`.
+
+    Missing data follows the polars `cum_*` convention: a null value
+    leaves the running state unchanged and emits null — except `count`,
+    which emits the unchanged running count, as `cum_count` does. NaN
+    follows the vertical convention from its entry onward within the
+    run: it poisons `sum`/`mean`/`std`, is skipped by
+    `min`/`max`/`delta`, sorts largest for `median`, and is counted by
+    `count`. `std` (ddof=1) emits null until a run prefix holds two
+    non-null values.
+
+    `value_column` takes float lists (`Float32` is preserved in the
+    output; integers raise) and `gate_column` Boolean lists. `count`
+    emits `UInt32`, polars' count dtype. A null row in either input
+    yields a null row; empty lists produce empty lists; mismatched
+    value/gate lengths raise. Length-1 literal lists broadcast.
+    """
+    return _plugin(
+        "cum_agg_runs",
+        [value_column, gate_column],
+        aggregation=aggregation,
+        outside=outside,
     )

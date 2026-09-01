@@ -1,3 +1,39 @@
+use serde::Deserialize;
+
+/// The aggregation vocabulary shared by `agg_slices` and `cum_agg_runs`
+/// (and mirrored in pure polars by `agg_lists`). Every member is valid
+/// for every aggregation-taking function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Aggregation {
+    Sum,
+    Mean,
+    Median,
+    Min,
+    Max,
+    Std,
+    Delta,
+    Count,
+}
+
+impl Aggregation {
+    pub(crate) fn apply(
+        &self,
+        values: &[f64],
+    ) -> Option<f64> {
+        match self {
+            Self::Sum => values.sum(),
+            Self::Mean => values.mean(),
+            Self::Median => values.median(),
+            Self::Min => values.min(),
+            Self::Max => values.max(),
+            Self::Std => values.std(),
+            Self::Delta => values.delta(),
+            Self::Count => Some(values.len() as f64),
+        }
+    }
+}
+
 /// Statistics over slices of data.
 pub(crate) trait Statistic {
     fn values(&self) -> &[f64];
@@ -6,12 +42,23 @@ pub(crate) trait Statistic {
         self.values().is_empty()
     }
 
+    /// Sum with polars' identity element: an empty selection sums to
+    /// `+0.0` (polars itself is split between `+0.0` and `-0.0` here,
+    /// and Rust's `Iterator::sum` starts from IEEE's additive identity
+    /// `-0.0`; the library standardizes on `+0.0`).
+    fn sum(&self) -> Option<f64> {
+        if self.is_empty() {
+            return Some(0.0);
+        }
+        Some(self.values().iter().sum())
+    }
+
     fn median(&self) -> Option<f64> {
         if self.is_empty() {
             return None;
         }
         let mut values = self.values().to_vec();
-        values.sort_by(|a, b| a.total_cmp(b));
+        values.sort_by(|a, b| crate::util::tot_cmp(*a, *b));
         let mid = values.len() / 2;
         if values.len().is_multiple_of(2) {
             Some((values[mid - 1] + values[mid]) / 2.0)

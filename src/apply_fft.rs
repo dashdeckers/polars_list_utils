@@ -33,7 +33,7 @@ fn apply_fft(
     let window = kwargs.window.unwrap_or_default();
     let scaling = kwargs.scaling.unwrap_or_default();
 
-    apply_list_transform(inputs, |cols| {
+    apply_list_transform(inputs, |_row, cols| {
         Ok(compute_fft(cols[0], kwargs.sample_rate, window, scaling))
     })
 }

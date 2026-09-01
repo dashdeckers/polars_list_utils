@@ -50,26 +50,53 @@ boost.
     - This is implemented in pure Polars (no plugin), and lives here so that both aggregation
       functions offer the same aggregations with the same missing-data behaviour.
 
-The four plugin functions accept a length-1 literal list column (e.g. `pl.lit([...])`) for
+- `polist.zip_binary`
+    - Applies a binary operation element-wise between two List-type columns, per element
+      exactly as the corresponding scalar Polars operation: arithmetic (`add`, `sub`, `mul`,
+      `div`) with null propagation and IEEE float behaviour (output dtype follows Polars
+      supertyping, so two `Float32` inputs stay `Float32`), `and`/`or` on Boolean lists with
+      Kleene logic, and comparisons (`gt`, `ge`, `lt`, `le`, `eq`, `ne`) following Polars'
+      total order (NaN equals NaN and exceeds everything else), emitting Boolean lists.
+
+- `polist.cum_agg_runs`
+    - Cumulatively aggregates a List-type column within runs gated by a Boolean List-type
+      column: a run is a maximal region of constant gate value (null gates break runs), only
+      `True`-gated elements accumulate, and every other position emits null (or a plain zero
+      with `outside="zero"`).
+    - Each emitted element equals the vertical aggregation over the run's elements so far,
+      so an all-`True` gate reproduces `cum_sum`/`cum_min`/`cum_max`/`cum_count`; null values
+      emit null but keep the running state, except `count`, which emits the running count as
+      `cum_count` does.
+    - `Float32` values stay `Float32`; `count` emits `UInt32` (Polars' count dtype).
+
+The six plugin functions accept a length-1 literal list column (e.g. `pl.lit([...])`) for
 any input and broadcast it across rows. Invalid configuration (bad cutoffs, unknown window
 names, mismatched list lengths) raises an error instead of silently returning nulls, while
 per-row data problems (e.g. a signal length that is not a power of two) yield null rows.
 
-Both aggregation functions support `mean`, `median`, `std`, `min`, `max`, `delta`, and
-`count`, and both handle missing data exactly like the vertical aggregations of Polars
+Both aggregation functions support `sum`, `mean`, `median`, `std`, `min`, `max`, `delta`,
+and `count`, and both handle missing data exactly like the vertical aggregations of Polars
 itself:
 
 - Nulls are skipped: excluded from both the numerator and the denominator, so `count`
-  only counts non-null values and an empty or all-null selection yields null (`count`: 0).
+  only counts non-null values and an empty or all-null selection yields null (`count`: 0,
+  `sum`: 0.0 — Polars' identity for sum).
 - NaNs propagate: Polars treats NaN as a legitimate float value, so it flows into the
-  sum and poisons `mean` and `std`. Two exceptions to be aware of are `min` and `max`,
+  sum and poisons `sum`, `mean` and `std`. Two exceptions to be aware of are `min` and `max`,
   which skip NaNs (unless all values are NaN), and `median` sorts NaN as the largest value.
 - `std` is the sample standard deviation (ddof=1) and yields null for fewer than two
   values, as in Polars.
 
 The three transforms instead turn any row with missing data (a null row, an empty list, or
 a list containing nulls) into a null output row: a signal with missing samples cannot be
-meaningfully transformed.
+meaningfully transformed. `zip_binary` and `cum_agg_runs` mirror the corresponding scalar
+and cumulative Polars operations per element instead, and treat empty lists as valid
+(empty in, empty out).
+
+Some checks are opt-in via `strict=True` (default off): `apply_interp` verifies that `x`
+is non-decreasing, `agg_slices` rejects inverted or NaN range bounds at expression
+construction, and `agg_lists` raises on lists longer than `list_length` instead of
+silently truncating them.
 
 ### Example
 
