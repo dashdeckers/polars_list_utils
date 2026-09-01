@@ -467,15 +467,17 @@ def test_run_state_resets_after_a_nan_poisoned_run():
     assert math.isnan(means[2]) and means[4] == 7.0
 
 
-def test_array_input_raises_cleanly():
-    # PR 0 exists because an Array input used to abort the process; the
-    # new plugins must also produce a catchable typed error.
+def test_array_input_is_supported():
+    # Array used to abort the process, then raised; it is now supported.
+    # A mixed Array value column and List gate is allowed, and the output
+    # follows the value column. See tests/test_array_container.py.
     df = pl.DataFrame(
         {"v": [[1.0, 2.0]], "g": [[True, True]]},
         schema={"v": pl.Array(pl.Float64, 2), "g": pl.List(pl.Boolean)},
     )
-    with pytest.raises(polars.exceptions.PolarsError, match="List column"):
-        df.select(polist.cum_agg_runs("v", "g", aggregation="sum"))
+    out = df.select(polist.cum_agg_runs("v", "g", aggregation="sum").alias("r"))
+    assert out["r"].dtype == pl.Array(pl.Float64, 2)
+    assert out["r"][0].to_list() == [1.0, 3.0]
 
 
 def test_float32_accumulates_in_f64_and_rounds_once():

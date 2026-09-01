@@ -16,11 +16,102 @@ pub(crate) fn tot_cmp(
     }
 }
 
-/// Output dtype for list-returning expressions.
-pub(crate) fn list_f64_output(_: &[Field]) -> PolarsResult<Field> {
+/// The container an input arrived in, so an output can be restored to
+/// the same shape.
+///
+/// Kernels only ever see `List`: `Array` is normalized on the way in and
+/// rebuilt on the way out, which keeps one kernel per function with the
+/// container handled entirely at the boundary. polars casts between the
+/// two losslessly, preserving inner dtype, null rows, inner nulls and
+/// zero widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Container {
+    List,
+    Array(usize),
+}
+
+impl Container {
+    /// Split a `List`/`Array` dtype into its container and inner dtype.
+    ///
+    /// Zero-width `Array`s are rejected here rather than supported:
+    /// polars-arrow panics when slicing a zero-width `FixedSizeList`
+    /// ("the offset of the new Buffer cannot exceed the existing
+    /// length"), which happens inside the plugin FFI boundary before any
+    /// of this code runs. Since every function resolves its output type
+    /// through this call at plan time, raising here stops the query
+    /// before execution — a typed error instead of a panic. A
+    /// zero-length `List` remains perfectly valid; only the fixed-width
+    /// container is affected.
+    pub(crate) fn split(
+        dtype: &DataType,
+        label: &str,
+    ) -> PolarsResult<(Self, DataType)> {
+        match dtype {
+            DataType::List(inner) => Ok((Self::List, (**inner).clone())),
+            DataType::Array(_, 0) => polars_bail!(
+                ComputeError:
+                "{label}: zero-width Arrays are not supported (polars panics when \
+                slicing them); use a List column for zero-length rows"
+            ),
+            DataType::Array(inner, width) => Ok((Self::Array(*width), (**inner).clone())),
+            dt => polars_bail!(
+                ComputeError: "{label} must be a List or Array column, got {dt}"
+            ),
+        }
+    }
+
+    /// This container holding elements of `inner`.
+    pub(crate) fn dtype(
+        self,
+        inner: DataType,
+    ) -> DataType {
+        match self {
+            Self::List => DataType::List(Box::new(inner)),
+            Self::Array(w) => DataType::Array(Box::new(inner), w),
+        }
+    }
+}
+
+/// Normalize an `Array` column to the equivalent `List` column, so
+/// kernels see a single container. `List` columns pass through.
+pub(crate) fn as_list(s: &Series) -> PolarsResult<Series> {
+    match s.dtype() {
+        DataType::Array(inner, _) => s.cast(&DataType::List(inner.clone())),
+        _ => Ok(s.clone()),
+    }
+}
+
+/// Restore a computed `List` series to `container`.
+pub(crate) fn restore(
+    s: Series,
+    container: Container,
+) -> PolarsResult<Series> {
+    match container {
+        Container::List => Ok(s),
+        Container::Array(width) => {
+            let (_, inner) = Container::split(s.dtype(), "output")?;
+            s.cast(&Container::Array(width).dtype(inner))
+        }
+    }
+}
+
+/// Output dtype for the transforms: `Float64` elements in the container
+/// `input_fields[from]` arrived in, whose width `width_of` maps (the FFT
+/// halves it; everything else preserves it).
+pub(crate) fn transform_output(
+    input_fields: &[Field],
+    from: usize,
+    label: &str,
+    width_of: impl Fn(usize) -> usize,
+) -> PolarsResult<Field> {
+    let (container, _) = Container::split(input_fields[from].dtype(), label)?;
+    let out = match container {
+        Container::List => Container::List,
+        Container::Array(w) => Container::Array(width_of(w)),
+    };
     Ok(Field::new(
         PlSmallStr::from(""),
-        DataType::List(Box::new(DataType::Float64)),
+        out.dtype(DataType::Float64),
     ))
 }
 
@@ -97,12 +188,14 @@ impl<T> ListInputs<T> {
         let cas = inputs
             .iter()
             .map(|s| {
+                let (_, inner) = Container::split(s.dtype(), "input")?;
                 polars_ensure!(
-                    matches!(s.dtype(), DataType::List(inner) if inner.is_primitive_numeric()),
-                    ComputeError: "expected List column with numeric inner dtype, got {}",
+                    inner.is_primitive_numeric(),
+                    ComputeError:
+                    "expected List or Array column with numeric inner dtype, got {}",
                     s.dtype()
                 );
-                s.cast(&list_f64)
+                as_list(s)?.cast(&list_f64)
             })
             .collect::<PolarsResult<Vec<Series>>>()?;
 
@@ -145,9 +238,12 @@ impl<T> ListInputs<T> {
 ///
 /// The closure receives one `&[f64]` per input column (length-1
 /// literals broadcast) and returns `Ok(None)` to emit a null row, or
-/// `Err` to abort the whole query. Null input rows stay null.
+/// `Err` to abort the whole query. Null input rows stay null. The result
+/// is restored to `out_container`, which the caller derives from
+/// whichever input governs the output shape.
 pub(crate) fn apply_list_transform<F>(
     inputs: &[Series],
+    out_container: Container,
     f: F,
 ) -> PolarsResult<Series>
 where
@@ -169,7 +265,7 @@ where
         }
     }
 
-    Ok(builder.finish().into_series())
+    restore(builder.finish().into_series(), out_container)
 }
 
 /// One `List` input for the dtype-preserving entry layer used by
@@ -182,24 +278,25 @@ where
 pub(crate) struct TypedListInput<T> {
     rows: Vec<Option<Vec<Option<T>>>>,
     inner_dtype: DataType,
+    container: Container,
 }
 
 impl TypedListInput<f64> {
-    /// Extract a float List column; inner dtype must be `Float32` or
-    /// `Float64` (anything else raises, ints included). `label` names
+    /// Extract a float List/Array column; inner dtype must be `Float32`
+    /// or `Float64` (anything else raises, ints included). `label` names
     /// the function and parameter for error messages.
     pub(crate) fn float(
         s: &Series,
         label: &str,
     ) -> PolarsResult<Self> {
-        let inner_dtype = list_inner_dtype(s, label)?;
+        let (container, inner_dtype) = Container::split(s.dtype(), label)?;
         polars_ensure!(
             matches!(inner_dtype, DataType::Float32 | DataType::Float64),
             ComputeError:
-            "{label} must be a List column with Float32 or Float64 inner dtype, got {}",
+            "{label} must have a Float32 or Float64 inner dtype, got {}",
             s.dtype()
         );
-        let cast = s.cast(&DataType::List(Box::new(DataType::Float64)))?;
+        let cast = as_list(s)?.cast(&DataType::List(Box::new(DataType::Float64)))?;
         let mut rows = Vec::with_capacity(cast.len());
         for opt in cast.list()?.into_iter() {
             rows.push(match opt {
@@ -207,30 +304,39 @@ impl TypedListInput<f64> {
                 Some(row) => Some(row.f64()?.into_iter().collect()),
             });
         }
-        Ok(Self { rows, inner_dtype })
+        Ok(Self {
+            rows,
+            inner_dtype,
+            container,
+        })
     }
 }
 
 impl TypedListInput<bool> {
-    /// Extract a Boolean List column; any other inner dtype raises.
+    /// Extract a Boolean List/Array column; any other inner dtype raises.
     pub(crate) fn boolean(
         s: &Series,
         label: &str,
     ) -> PolarsResult<Self> {
-        let inner_dtype = list_inner_dtype(s, label)?;
+        let (container, inner_dtype) = Container::split(s.dtype(), label)?;
         polars_ensure!(
             inner_dtype == DataType::Boolean,
-            ComputeError: "{label} must be a List column with Boolean inner dtype, got {}",
+            ComputeError: "{label} must have a Boolean inner dtype, got {}",
             s.dtype()
         );
-        let mut rows = Vec::with_capacity(s.len());
-        for opt in s.list()?.into_iter() {
+        let normalized = as_list(s)?;
+        let mut rows = Vec::with_capacity(normalized.len());
+        for opt in normalized.list()?.into_iter() {
             rows.push(match opt {
                 None => None,
                 Some(row) => Some(row.bool()?.into_iter().collect()),
             });
         }
-        Ok(Self { rows, inner_dtype })
+        Ok(Self {
+            rows,
+            inner_dtype,
+            container,
+        })
     }
 }
 
@@ -244,6 +350,10 @@ impl<T> TypedListInput<T> {
         &self.inner_dtype
     }
 
+    pub(crate) fn container(&self) -> Container {
+        self.container
+    }
+
     /// Row `i` with length-1 literal broadcasting; `None` is a null row.
     pub(crate) fn row(
         &self,
@@ -253,22 +363,12 @@ impl<T> TypedListInput<T> {
     }
 }
 
-/// The inner dtype of a `List` column, or a clear error.
-fn list_inner_dtype(
-    s: &Series,
-    label: &str,
-) -> PolarsResult<DataType> {
-    match s.dtype() {
-        DataType::List(inner) => Ok(*inner.clone()),
-        dt => polars_bail!(ComputeError: "{label} must be a List column, got {dt}"),
-    }
-}
-
 /// Build a `List` float series from per-row optional elements, casting
 /// the `f64`-computed values to `inner` once at the exit boundary.
 pub(crate) fn build_float_list(
     rows: Vec<Option<Vec<Option<f64>>>>,
     inner: &DataType,
+    container: Container,
 ) -> PolarsResult<Series> {
     let mut builder = ListPrimitiveChunkedBuilder::<Float64Type>::new(
         PlSmallStr::from(""),
@@ -283,15 +383,19 @@ pub(crate) fn build_float_list(
         }
     }
     let s = builder.finish().into_series();
-    if *inner == DataType::Float64 {
-        Ok(s)
+    let s = if *inner == DataType::Float64 {
+        s
     } else {
-        s.cast(&DataType::List(Box::new(inner.clone())))
-    }
+        s.cast(&DataType::List(Box::new(inner.clone())))?
+    };
+    restore(s, container)
 }
 
-/// Build a `List(Boolean)` series from per-row optional elements.
-pub(crate) fn build_bool_list(rows: Vec<Option<Vec<Option<bool>>>>) -> Series {
+/// Build a Boolean series from per-row optional elements.
+pub(crate) fn build_bool_list(
+    rows: Vec<Option<Vec<Option<bool>>>>,
+    container: Container,
+) -> PolarsResult<Series> {
     let mut builder =
         ListBooleanChunkedBuilder::new(PlSmallStr::from(""), rows.len(), rows.len() * 8);
     for row in rows {
@@ -300,12 +404,15 @@ pub(crate) fn build_bool_list(rows: Vec<Option<Vec<Option<bool>>>>) -> Series {
             None => builder.append_null(),
         }
     }
-    builder.finish().into_series()
+    restore(builder.finish().into_series(), container)
 }
 
-/// Build a `List(UInt32)` series from per-row optional elements
-/// (the `count` aggregation's dtype, as in polars).
-pub(crate) fn build_u32_list(rows: Vec<Option<Vec<Option<u32>>>>) -> Series {
+/// Build a `UInt32` series from per-row optional elements (the `count`
+/// aggregation's dtype, as in polars).
+pub(crate) fn build_u32_list(
+    rows: Vec<Option<Vec<Option<u32>>>>,
+    container: Container,
+) -> PolarsResult<Series> {
     let mut builder = ListPrimitiveChunkedBuilder::<UInt32Type>::new(
         PlSmallStr::from(""),
         rows.len(),
@@ -318,5 +425,5 @@ pub(crate) fn build_u32_list(rows: Vec<Option<Vec<Option<u32>>>>) -> Series {
             None => builder.append_null(),
         }
     }
-    builder.finish().into_series()
+    restore(builder.finish().into_series(), container)
 }

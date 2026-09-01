@@ -1,10 +1,9 @@
-"""Polars expression plugins for signal processing on List columns.
+"""Polars expression plugins for signal processing on list columns.
 
-Six Rust plugins operating elementwise on List columns, plus one
-pure-polars helper. The four original functions take `List[f64]`
-(anything numeric is cast to it); :func:`zip_binary` and
-:func:`cum_agg_runs` instead take float or Boolean inners as their
-operands require, and preserve `Float32`:
+Six Rust plugins operating elementwise, plus one pure-polars helper. The
+four original functions take `List[f64]` (anything numeric is cast to
+it); :func:`zip_binary` and :func:`cum_agg_runs` instead take float or
+Boolean inners as their operands require, and preserve `Float32`:
 
 - :func:`apply_interp`: interpolate (x, y) data onto new x coordinates.
 - :func:`apply_butterworth`: zero-phase Butterworth filtering.
@@ -13,6 +12,18 @@ operands require, and preserve `Float32`:
 - :func:`agg_lists`: aggregate list columns elementwise over rows.
 - :func:`zip_binary`: element-wise binary ops between two list columns.
 - :func:`cum_agg_runs`: cumulative aggregation within gated runs.
+
+Both `List` and `Array` columns are accepted everywhere, and a
+length-preserving function returns the container it was given —
+`apply_fft` narrows an `Array(w)` to `Array(w // 2 + 1)`, and
+`apply_interp` follows its `xp` argument, since that is what decides the
+output's shape. `zip_binary` returns an `Array` only when both operands
+are `Array`s of equal width, which the schema settles before execution;
+a mixed pair is allowed and gives a `List`. Two exceptions:
+:func:`agg_slices` reduces to a scalar, and :func:`agg_lists` always
+returns a `List`, being an expression composition that never sees its
+input's schema. Zero-width `Array`s are rejected — polars panics when
+slicing them — while zero-length `List`s are fine.
 
 The plugins accept length-1 literal list columns (e.g. `pl.lit(...)`)
 for any input and broadcast them. Null rows produce null output rows.
@@ -373,11 +384,17 @@ def agg_lists(
         raise ValueError(f"list_length must be at least 1, got {list_length}")
     _check_choice(aggregation, _AGGREGATIONS, "aggregation", "agg_lists")
     _check_choice(empty, _EMPTY, "empty", "agg_lists")
-    col = polars_func_arg_into_col_expr(list_column)
-    if strict:
-        # Pure polars cannot raise from inside an expression, so the
-        # length check rides along as an elementwise pass-through plugin.
-        col = _plugin("check_list_len", [col], list_length=list_length)
+    # The pass-through plugin normalizes Array to List (the `.list`
+    # namespace rejects Array, and an expression cannot branch on a dtype
+    # it has not resolved yet) and, under strict, raises on rows that
+    # would lose data — which pure polars cannot do from inside an
+    # expression.
+    col = _plugin(
+        "prepare_agg_lists",
+        [polars_func_arg_into_col_expr(list_column)],
+        list_length=list_length,
+        strict=strict,
+    )
     agg = (_AGGS if empty == "null" else _AGGS_EMPTY_ZERO)[aggregation]
     return pl.concat_list(
         agg(col.list.slice(offset=n, length=1).list.first())

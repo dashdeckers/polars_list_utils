@@ -1,5 +1,5 @@
 use crate::util::{
-    TypedListInput, broadcast_len, build_bool_list, build_float_list, tot_cmp,
+    Container, TypedListInput, broadcast_len, build_bool_list, build_float_list, tot_cmp,
 };
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
@@ -138,29 +138,47 @@ fn arithmetic_inner(
     }
 }
 
-/// Plan-time dtype validation for one operand.
+/// Plan-time container and dtype validation for one operand.
 fn validate_operand(
     dtype: &DataType,
     op: Op,
     label: &str,
-) -> PolarsResult<DataType> {
-    let DataType::List(inner) = dtype else {
-        polars_bail!(ComputeError: "{label} must be a List column, got {dtype}");
-    };
+) -> PolarsResult<(Container, DataType)> {
+    let (container, inner) = Container::split(dtype, label)?;
     if op.takes_booleans() {
         polars_ensure!(
-            **inner == DataType::Boolean,
-            ComputeError: "{label} must be a List column with Boolean inner dtype for \
-            'and'/'or', got {dtype}"
+            inner == DataType::Boolean,
+            ComputeError: "{label} must have a Boolean inner dtype for 'and'/'or', \
+            got {dtype}"
         );
     } else {
         polars_ensure!(
-            matches!(**inner, DataType::Float32 | DataType::Float64),
-            ComputeError:
-            "{label} must be a List column with Float32 or Float64 inner dtype, got {dtype}"
+            matches!(inner, DataType::Float32 | DataType::Float64),
+            ComputeError: "{label} must have a Float32 or Float64 inner dtype, got {dtype}"
         );
     }
-    Ok(*inner.clone())
+    Ok((container, inner))
+}
+
+/// The output container: `Array` only when both operands are `Array`, in
+/// which case their widths must agree — a mismatch the schema already
+/// knows about, so it raises at plan time. A mixed `List`/`Array` pair is
+/// allowed and yields `List`, with the length checked per row.
+fn zip_container(
+    left: Container,
+    right: Container,
+) -> PolarsResult<Container> {
+    match (left, right) {
+        (Container::Array(lw), Container::Array(rw)) => {
+            polars_ensure!(
+                lw == rw,
+                ComputeError:
+                "zip_binary: Array operands must have equal widths, got {lw} and {rw}"
+            );
+            Ok(Container::Array(lw))
+        }
+        _ => Ok(Container::List),
+    }
 }
 
 fn zip_binary_output(
@@ -172,12 +190,12 @@ fn zip_binary_output(
         ComputeError: "zip_binary expects exactly 2 inputs, got {}",
         input_fields.len()
     );
-    let left = validate_operand(
+    let (lc, left) = validate_operand(
         input_fields[0].dtype(),
         kwargs.op,
         "zip_binary: left_column",
     )?;
-    let right = validate_operand(
+    let (rc, right) = validate_operand(
         input_fields[1].dtype(),
         kwargs.op,
         "zip_binary: right_column",
@@ -189,7 +207,7 @@ fn zip_binary_output(
     };
     Ok(Field::new(
         PlSmallStr::from(""),
-        DataType::List(Box::new(inner)),
+        zip_container(lc, rc)?.dtype(inner),
     ))
 }
 
@@ -217,15 +235,17 @@ fn zip_binary(
             TypedListInput::<bool>::boolean(&inputs[0], "zip_binary: left_column")?;
         let right =
             TypedListInput::<bool>::boolean(&inputs[1], "zip_binary: right_column")?;
+        let out = zip_container(left.container(), right.container())?;
         let len = broadcast_len(&[left.n_rows(), right.n_rows()])?;
         let rows = (0..len)
             .map(|i| zip_row(left.row(i), right.row(i), |a, b| kleene(op, a, b)))
             .collect::<PolarsResult<Vec<_>>>()?;
-        return Ok(build_bool_list(rows));
+        return build_bool_list(rows, out);
     }
 
     let left = TypedListInput::<f64>::float(&inputs[0], "zip_binary: left_column")?;
     let right = TypedListInput::<f64>::float(&inputs[1], "zip_binary: right_column")?;
+    let out = zip_container(left.container(), right.container())?;
     let len = broadcast_len(&[left.n_rows(), right.n_rows()])?;
 
     if op.is_arithmetic() {
@@ -235,11 +255,12 @@ fn zip_binary(
         build_float_list(
             rows,
             &arithmetic_inner(left.inner_dtype(), right.inner_dtype()),
+            out,
         )
     } else {
         let rows = (0..len)
             .map(|i| zip_row(left.row(i), right.row(i), |a, b| comparison(op, a, b)))
             .collect::<PolarsResult<Vec<_>>>()?;
-        Ok(build_bool_list(rows))
+        build_bool_list(rows, out)
     }
 }

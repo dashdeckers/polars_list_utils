@@ -1,4 +1,4 @@
-use crate::util::{apply_list_transform, list_f64_output};
+use crate::util::{Container, apply_list_transform, transform_output};
 use interp::{InterpMode, interp_slice};
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
@@ -10,6 +10,13 @@ struct InterpKwargs {
     strict: bool,
 }
 
+/// Shape follows `xp`: the output holds one value per query coordinate,
+/// so the query column decides both length and container. The `x`/`y`
+/// containers are irrelevant.
+fn interp_output(input_fields: &[Field]) -> PolarsResult<Field> {
+    transform_output(input_fields, 2, "apply_interp: xp_column", |w| w)
+}
+
 /// Interpolate `y` values from `(x, y)` data onto new `xp` coordinates,
 /// as in numpy.interp; `xp` values outside the data range clamp to the
 /// first/last `y` value.
@@ -19,12 +26,13 @@ struct InterpKwargs {
 /// silently interpolates garbage, as in numpy. NaN in `x` is a
 /// legitimate float that propagates into the output either way: the
 /// check exists for the silent failure, not the visible one.
-#[polars_expr(output_type_func=list_f64_output)]
+#[polars_expr(output_type_func=interp_output)]
 fn apply_interp(
     inputs: &[Series],
     kwargs: InterpKwargs,
 ) -> PolarsResult<Series> {
-    apply_list_transform(inputs, |cols| {
+    let (out, _) = Container::split(inputs[2].dtype(), "apply_interp: xp_column")?;
+    apply_list_transform(inputs, out, |cols| {
         polars_ensure!(
             cols[0].len() == cols[1].len(),
             ComputeError: "apply_interp: x and y lists differ in length ({} vs {})",

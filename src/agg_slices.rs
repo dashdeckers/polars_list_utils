@@ -1,6 +1,6 @@
 use crate::slice::{Range, Slice};
 use crate::statistic::{Aggregation, Empty};
-use crate::util::ListInputs;
+use crate::util::{Container, ListInputs};
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
@@ -13,6 +13,18 @@ struct AggSlicesKwargs {
     empty: Empty,
 }
 
+/// Always a `Float64` scalar — there is no container to propagate — but
+/// resolved through a function rather than declared statically, so the
+/// inputs are validated at plan time. That is what keeps a zero-width
+/// `Array` from reaching the FFI boundary, where polars would panic
+/// rather than raise.
+fn agg_slices_output(input_fields: &[Field]) -> PolarsResult<Field> {
+    for (field, label) in input_fields.iter().zip(["value_column", "index_column"]) {
+        Container::split(field.dtype(), &format!("agg_slices: {label}"))?;
+    }
+    Ok(Field::new(PlSmallStr::from(""), DataType::Float64))
+}
+
 /// Aggregate the values whose paired index falls within the requested
 /// index ranges.
 ///
@@ -21,7 +33,7 @@ struct AggSlicesKwargs {
 /// float value that flows into the aggregation. An empty selection
 /// yields null (`count` reading 0, and `sum` following the `empty`
 /// setting). NaN indices never match any range.
-#[polars_expr(output_type=Float64)]
+#[polars_expr(output_type_func=agg_slices_output)]
 fn agg_slices(
     inputs: &[Series],
     kwargs: AggSlicesKwargs,

@@ -99,6 +99,17 @@ meaningfully transformed. `zip_binary` and `cum_agg_runs` mirror the correspondi
 and cumulative Polars operations per element instead, and treat empty lists as valid
 (empty in, empty out).
 
+### List and Array
+
+Every function accepts both `List` and `Array` columns. A length-preserving function
+returns the container it was given; `apply_fft` narrows an `Array(w)` to `Array(w // 2 + 1)`,
+and `apply_interp` follows its `xp` argument, since that decides the output's shape.
+`zip_binary` returns an `Array` only when both operands are `Array`s of equal width — a
+mismatch is caught before execution — and a mixed pair gives a `List`. Two exceptions:
+`agg_slices` reduces to a scalar, and `agg_lists` always returns a `List`, being an
+expression composition that never sees its input's schema. Zero-width `Array`s are
+rejected, because Polars panics when slicing them; zero-length `List`s are fine.
+
 ### Two conventions, one switch
 
 Polars answers "what is the sum of no values" with `0.0`, the identity element of addition.

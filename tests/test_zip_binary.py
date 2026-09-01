@@ -258,15 +258,16 @@ def test_empty_lists_zip_to_empty_on_every_path(op, dtype):
     assert out["r"][0].to_list() == []
 
 
-def test_array_input_raises_cleanly():
-    # PR 0 exists because an Array input used to abort the process; the
-    # new plugins must also produce a catchable typed error.
+def test_array_input_is_supported():
+    # Array used to abort the process, then raised; it is now supported.
+    # The container algebra lives in tests/test_array_container.py.
     df = pl.DataFrame(
         {"a": [[1.0, 2.0]], "b": [[3.0, 4.0]]},
         schema={"a": pl.Array(pl.Float64, 2), "b": pl.Array(pl.Float64, 2)},
     )
-    with pytest.raises(polars.exceptions.PolarsError, match="List column"):
-        df.select(polist.zip_binary("a", "b", op="add"))
+    out = df.select(polist.zip_binary("a", "b", op="add").alias("r"))
+    assert out["r"].dtype == pl.Array(pl.Float64, 2)
+    assert out["r"][0].to_list() == [4.0, 6.0]
 
 
 @pytest.mark.parametrize("engine", ["in-memory", "streaming"])

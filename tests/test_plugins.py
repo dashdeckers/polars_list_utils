@@ -628,19 +628,23 @@ def test_integer_lists_are_accepted():
     assert df["yp"][0].to_list() == pytest.approx([15.0])
 
 
-def test_array_input_raises_instead_of_aborting():
+def test_array_input_is_supported_not_aborting():
     # Without the polars `dtype-array` feature, an Array input panicked in
-    # polars' arrow-FFI import before any plugin check ran -- a non-unwinding
-    # panic that aborted the whole process. It must be a catchable typed
-    # error (until Array support proper lands).
+    # polars' arrow-FFI import before any plugin check ran -- a
+    # non-unwinding panic that aborted the whole process. It is now a
+    # supported container; see tests/test_array_container.py for the
+    # container algebra. This keeps the original regression honest: the
+    # calls that used to abort must complete.
     df = pl.DataFrame(
         {"v": [[1.0, 2.0], [3.0, 4.0]]},
         schema={"v": pl.Array(pl.Float64, 2)},
     )
-    with pytest.raises(polars.exceptions.PolarsError, match="expected List column"):
-        df.with_columns(polist.agg_slices("v", "v", aggregation="mean").alias("a"))
-    with pytest.raises(polars.exceptions.PolarsError, match="expected List column"):
-        df.with_columns(polist.apply_fft("v", sample_rate=FS).alias("a"))
+    out = df.with_columns(
+        polist.agg_slices("v", "v", aggregation="mean").alias("a"),
+        polist.apply_fft("v", sample_rate=FS).alias("f"),
+    )
+    assert out["a"].to_list() == pytest.approx([1.5, 3.5])
+    assert out["f"].dtype == pl.Array(pl.Float64, 2)
 
 
 def test_broadcasting_literal_over_rows():

@@ -1,6 +1,6 @@
 use crate::statistic::{Aggregation, Statistic, max_fold, midpoint, min_fold};
 use crate::util::{
-    TypedListInput, broadcast_len, build_float_list, build_u32_list, tot_cmp,
+    Container, TypedListInput, broadcast_len, build_float_list, build_u32_list, tot_cmp,
 };
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
@@ -169,20 +169,19 @@ fn cum_agg_runs_output(
         ComputeError: "cum_agg_runs expects exactly 2 inputs, got {}",
         input_fields.len()
     );
-    let value_inner = match input_fields[0].dtype() {
-        DataType::List(inner)
-            if matches!(**inner, DataType::Float32 | DataType::Float64) =>
-        {
-            *inner.clone()
-        }
-        dt => polars_bail!(ComputeError:
-            "cum_agg_runs: value_column must be a List column with Float32 or Float64 \
-            inner dtype, got {dt}"),
-    };
+    let (values, value_inner) =
+        Container::split(input_fields[0].dtype(), "cum_agg_runs: value_column")?;
     polars_ensure!(
-        matches!(input_fields[1].dtype(), DataType::List(inner) if **inner == DataType::Boolean),
-        ComputeError: "cum_agg_runs: gate_column must be a List column with Boolean inner \
+        matches!(value_inner, DataType::Float32 | DataType::Float64),
+        ComputeError: "cum_agg_runs: value_column must have a Float32 or Float64 inner \
         dtype, got {}",
+        input_fields[0].dtype()
+    );
+    let (gates, gate_inner) =
+        Container::split(input_fields[1].dtype(), "cum_agg_runs: gate_column")?;
+    polars_ensure!(
+        gate_inner == DataType::Boolean,
+        ComputeError: "cum_agg_runs: gate_column must have a Boolean inner dtype, got {}",
         input_fields[1].dtype()
     );
     // count emits UInt32, polars' count dtype; everything else keeps
@@ -193,8 +192,25 @@ fn cum_agg_runs_output(
     };
     Ok(Field::new(
         PlSmallStr::from(""),
-        DataType::List(Box::new(inner)),
+        run_container(values, gates)?.dtype(inner),
     ))
+}
+
+/// The scan is length-preserving, so the output keeps the value
+/// column's container. Two `Array` inputs must agree on width — visible
+/// in the schema, so it raises at plan time.
+fn run_container(
+    values: Container,
+    gates: Container,
+) -> PolarsResult<Container> {
+    if let (Container::Array(vw), Container::Array(gw)) = (values, gates) {
+        polars_ensure!(
+            vw == gw,
+            ComputeError:
+            "cum_agg_runs: value and gate Arrays must have equal widths, got {vw} and {gw}"
+        );
+    }
+    Ok(values)
 }
 
 /// Cumulative aggregation within gated runs of a list column.
@@ -213,6 +229,7 @@ fn cum_agg_runs(
     );
     let values = TypedListInput::<f64>::float(&inputs[0], "cum_agg_runs: value_column")?;
     let gates = TypedListInput::<bool>::boolean(&inputs[1], "cum_agg_runs: gate_column")?;
+    let out = run_container(values.container(), gates.container())?;
     let len = broadcast_len(&[values.n_rows(), gates.n_rows()])?;
 
     let mut rows: Vec<Option<Vec<Option<f64>>>> = Vec::with_capacity(len);
@@ -238,8 +255,8 @@ fn cum_agg_runs(
                 })
             })
             .collect();
-        Ok(build_u32_list(rows))
+        build_u32_list(rows, out)
     } else {
-        build_float_list(rows, values.inner_dtype())
+        build_float_list(rows, values.inner_dtype(), out)
     }
 }
