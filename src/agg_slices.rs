@@ -1,5 +1,5 @@
 use crate::slice::{Range, Slice};
-use crate::statistic::Aggregation;
+use crate::statistic::{Aggregation, Empty};
 use crate::util::ListInputs;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
@@ -10,6 +10,7 @@ struct AggSlicesKwargs {
     aggregation: Aggregation,
     slices_include: Option<Vec<Range>>,
     slices_exclude: Option<Vec<Range>>,
+    empty: Empty,
 }
 
 /// Aggregate the values whose paired index falls within the requested
@@ -18,8 +19,8 @@ struct AggSlicesKwargs {
 /// Missing data follows the polars convention: null elements are
 /// skipped (pairwise with their index), while NaN is a legitimate
 /// float value that flows into the aggregation. An empty selection
-/// yields null (`count`: 0, `sum`: 0.0). NaN indices never match any
-/// range.
+/// yields null (`count` reading 0, and `sum` following the `empty`
+/// setting). NaN indices never match any range.
 #[polars_expr(output_type=Float64)]
 fn agg_slices(
     inputs: &[Series],
@@ -48,8 +49,8 @@ fn agg_slices(
 
             // Polars missing-data convention: null elements are skipped
             // (pairwise with their index), NaN values flow through. The
-            // aggregations turn an empty selection into None (count: 0,
-            // sum: 0.0).
+            // aggregations turn an empty selection into None, except
+            // count, which reads 0.
             let selected = values
                 .iter()
                 .zip(indices)
@@ -58,7 +59,7 @@ fn agg_slices(
                 .map(|(value, _index)| value)
                 .collect::<Vec<f64>>();
 
-            Ok(kwargs.aggregation.apply(&selected))
+            Ok(kwargs.aggregation.apply(&selected, kwargs.empty))
         })
         .collect::<PolarsResult<_>>()?;
 

@@ -85,8 +85,8 @@ and `count`, and both handle missing data like the vertical aggregations of Pola
 agree to rounding rather than bit-for-bit.)
 
 - Nulls are skipped: excluded from both the numerator and the denominator, so `count`
-  only counts non-null values and an empty or all-null selection yields null (`count`: 0,
-  `sum`: 0.0 — Polars' identity for sum).
+  only counts non-null values and an empty or all-null selection yields null, `count`
+  reading 0 and `sum` following the `empty` setting below.
 - NaNs propagate: Polars treats NaN as a legitimate float value, so it flows into the
   sum and poisons `sum`, `mean` and `std`. Two exceptions to be aware of are `min` and `max`,
   which skip NaNs (unless all values are NaN), and `median` sorts NaN as the largest value.
@@ -99,11 +99,28 @@ meaningfully transformed. `zip_binary` and `cum_agg_runs` mirror the correspondi
 and cumulative Polars operations per element instead, and treat empty lists as valid
 (empty in, empty out).
 
-Some checks are opt-in via `strict=True` (default off): `apply_interp` verifies that `x`
-is non-decreasing, `agg_slices` rejects inverted or NaN range bounds at expression
-construction, and `agg_lists` raises on lists longer than `list_length` instead of
-silently truncating them. Each check covers a failure that is otherwise silent; NaN, which
-announces itself in the output, propagates rather than raising.
+### Two conventions, one switch
+
+Polars answers "what is the sum of no values" with `0.0`, the identity element of addition.
+For feature extraction that is the dangerous answer: an empty selection usually means a
+misconfigured range, and a real `0.0` disguises that as a measurement which then sails
+through a threshold. So `agg_slices` and `agg_lists` take an `empty` argument:
+
+- `empty="null"` (default) — summing nothing is unknown, not zero.
+- `empty="zero"` — Polars' convention. Equivalent to `.fill_null(0.0)` on the default, and
+  what you want when the result must agree with `explode().group_by().sum()`.
+
+It reaches exactly one cell of the matrix: `sum` is the only aggregation with a non-null
+identity, every other one yields null over nothing either way, and `count` yields 0 either
+way.
+
+The same philosophy sets the `strict` default. `apply_interp` verifies that `x` is
+non-decreasing, `agg_slices` rejects inverted or NaN range bounds at expression
+construction, and `agg_lists` raises on lists longer than `list_length` rather than
+silently truncating them — all **on by default**, since each covers a failure that is
+otherwise silent. Pass `strict=False` for the lenient readings (numpy's unsorted-`x`
+behaviour, empty selections from inverted ranges, `list_length` as a deliberate window).
+NaN, which announces itself in the output, propagates rather than raising either way.
 
 Errors raised from inside a row describe the offending row by its shape rather than its
 position: Polars hands a plugin one chunk at a time, so any row number counted there would

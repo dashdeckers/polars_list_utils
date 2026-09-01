@@ -118,7 +118,7 @@ def test_infinite_and_nan_bounds_still_work(df_ramp):
             "v", "i", aggregation="count", slices_include=[(-INF, INF)]
         ).alias("all"),
         polist.agg_slices(
-            "v", "i", aggregation="count", slices_include=[(NAN, NAN)]
+            "v", "i", aggregation="count", slices_include=[(NAN, NAN)], strict=False
         ).alias("none"),
     )
     assert out["all"][0] == 11.0

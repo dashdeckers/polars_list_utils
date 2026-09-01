@@ -249,27 +249,62 @@ def test_agg_slices_empty_selection_is_null(df_ramp):
     assert out["cnt"][0] == 0.0
 
 
-def test_agg_slices_empty_selection_sum_is_positive_zero(df_ramp):
-    # Sum's empty identity is +0.0 (polars itself is split between
-    # +0.0 for Series.sum and -0.0 for list.sum of an empty list).
+def test_agg_slices_empty_selection_sum_follows_the_empty_flag(df_ramp):
+    # Summing nothing is unknown by default; "zero" restores polars'
+    # identity element for callers who want the two to agree.
     out = df_ramp.with_columns(
         polist.agg_slices(
             "v", "i", aggregation="sum", slices_include=[(100.0, 200.0)]
-        ).alias("s")
+        ).alias("null"),
+        polist.agg_slices(
+            "v", "i", aggregation="sum", slices_include=[(100.0, 200.0)], empty="zero"
+        ).alias("zero"),
     )
-    assert out["s"][0] == 0.0
-    assert math.copysign(1.0, out["s"][0]) == 1.0
+    assert out["null"][0] is None
+    assert out["zero"][0] == 0.0
+    # polars is itself split between +0.0 (Series.sum) and -0.0
+    # (list.sum of an empty list); the library standardizes on +0.0.
+    assert math.copysign(1.0, out["zero"][0]) == 1.0
 
 
-def test_agg_slices_all_null_selection_sums_to_zero():
+def test_agg_slices_all_null_selection_follows_the_empty_flag():
     df = pl.DataFrame(
         {"v": [[None, None]], "i": [[0.0, 1.0]]},
         schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
     )
     out = df.with_columns(
-        polist.agg_slices("v", "i", aggregation="sum").alias("s")
+        polist.agg_slices("v", "i", aggregation="sum").alias("null"),
+        polist.agg_slices("v", "i", aggregation="sum", empty="zero").alias("zero"),
     )
-    assert out["s"][0] == 0.0
+    assert out["null"][0] is None
+    assert out["zero"][0] == 0.0
+
+
+def test_empty_zero_reproduces_the_explode_equivalence():
+    # Any list aggregation can be rewritten as explode + group_by + agg.
+    # That equivalence holds for every aggregation under the default,
+    # and for `sum` only under empty="zero" -- the one documented
+    # departure from polars' vertical convention.
+    data = [1.0, 2.0, 3.0]
+    df = pl.DataFrame(
+        {"v": [data], "i": [[0.0, 1.0, 2.0]]},
+        schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
+    )
+    empty_range: list[polist.Range] = [(100.0, 200.0)]
+    exploded = pl.Series([], dtype=pl.Float64)  # the same empty selection
+
+    got_zero = df.select(
+        polist.agg_slices(
+            "v", "i", aggregation="sum", slices_include=empty_range, empty="zero"
+        ).alias("r")
+    )["r"][0]
+    got_null = df.select(
+        polist.agg_slices(
+            "v", "i", aggregation="sum", slices_include=empty_range
+        ).alias("r")
+    )["r"][0]
+    assert got_zero == exploded.sum()  # agrees with polars
+    assert got_null is None  # deliberately does not
 
 
 def test_agg_slices_matches_polars_vertical_semantics():
@@ -390,21 +425,52 @@ def test_agg_lists_elementwise_over_groups():
     assert out["mean"][1].to_list() == pytest.approx([7.0, 8.0, 9.0])
 
 
-def test_agg_lists_sum_of_all_null_position_is_zero():
-    # Vertical sum over an all-null position is polars' identity, 0.0.
+def test_agg_lists_sum_of_all_null_position_follows_the_empty_flag():
+    # The same switch as agg_slices, so both aggregating functions give
+    # one answer to "what is the sum of no values".
     df = pl.DataFrame(
         {"g": [1, 1], "v": [[1.0, None], [2.0, None]]},
         schema={"g": pl.Int64, "v": pl.List(pl.Float64)},
     )
     out = df.group_by("g").agg(
-        polist.agg_lists("v", list_length=2, aggregation="sum").alias("s")
+        polist.agg_lists("v", list_length=2, aggregation="sum").alias("null"),
+        polist.agg_lists(
+            "v", list_length=2, aggregation="sum", empty="zero"
+        ).alias("zero"),
     )
-    assert out["s"][0].to_list() == [3.0, 0.0]
+    assert out["null"][0].to_list() == [3.0, None]
+    assert out["zero"][0].to_list() == [3.0, 0.0]
 
 
 def test_agg_lists_invalid_length_raises():
     with pytest.raises(ValueError, match="list_length"):
         polist.agg_lists("v", list_length=0, aggregation="mean")
+
+
+@pytest.mark.parametrize("empty", ["null", "zero"])
+def test_both_aggregators_agree_on_the_sum_of_nothing(empty):
+    # The two functions must give one answer to "what is the sum of no
+    # values", under either setting.
+    horizontal = pl.DataFrame(
+        {"v": [[None, None]], "i": [[0.0, 1.0]]},
+        schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
+    ).select(
+        polist.agg_slices("v", "i", aggregation="sum", empty=empty).alias("r")
+    )["r"][0]
+    vertical = (
+        pl.DataFrame(
+            {"g": [1, 1], "v": [[None], [None]]},
+            schema={"g": pl.Int64, "v": pl.List(pl.Float64)},
+        )
+        .group_by("g")
+        .agg(
+            polist.agg_lists(
+                "v", list_length=1, aggregation="sum", empty=empty
+            ).alias("r")
+        )["r"][0]
+        .to_list()[0]
+    )
+    assert horizontal == vertical
 
 
 def test_agg_lists_and_agg_slices_share_missing_data_semantics():

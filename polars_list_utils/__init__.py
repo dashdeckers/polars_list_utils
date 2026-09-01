@@ -43,6 +43,7 @@ IntoExprColumn = str | pl.Expr | pl.Series
 Window = Literal["hann", "hanning", "blackman"]
 Scaling = Literal["amplitude", "power", "psd"]
 Aggregation = Literal["sum", "mean", "median", "std", "min", "max", "delta", "count"]
+Empty = Literal["null", "zero"]
 BinaryOp = Literal[
     "add", "sub", "mul", "div", "and", "or", "gt", "ge", "lt", "le", "eq", "ne"
 ]
@@ -57,6 +58,7 @@ _LIB = Path(__file__).parent
 __all__ = [
     "Aggregation",
     "BinaryOp",
+    "Empty",
     "IntoExprColumn",
     "Range",
     "RangeBound",
@@ -101,7 +103,7 @@ def apply_interp(
     y_column: IntoExprColumn,
     xp_column: IntoExprColumn,
     *,
-    strict: bool = False,
+    strict: bool = True,
 ) -> pl.Expr:
     """Interpolate `(x, y)` data onto the `xp` coordinates.
 
@@ -109,12 +111,12 @@ def apply_interp(
     values outside the data range clamped to the first/last `y` value.
     `x` must be sorted in increasing order.
 
-    With `strict=True` a row whose `x` values descend raises
-    (duplicates stay legal, as in numpy). The default keeps numpy's
-    silent behaviour: unsorted `x` interpolates garbage without
-    complaint. A NaN in `x` is a legitimate float either way and
-    propagates into the output rather than raising — the check exists
-    for the failure you cannot see, not the one you can.
+    With `strict=True` (the default) a row whose `x` values descend
+    raises; duplicates stay legal, as in numpy. Pass `strict=False` for
+    numpy's silent behaviour, where unsorted `x` interpolates garbage
+    without complaint. A NaN in `x` is a legitimate float either way
+    and propagates into the output rather than raising — the check
+    exists for the failure you cannot see, not the one you can.
 
     Returns a `List[f64]` column of interpolated y values, one per
     `xp` coordinate. Raises if x and y lists differ in length.
@@ -235,7 +237,8 @@ def agg_slices(
     aggregation: Aggregation,
     slices_include: list[Range] | None = None,
     slices_exclude: list[Range] | None = None,
-    strict: bool = False,
+    empty: Empty = "null",
+    strict: bool = True,
 ) -> pl.Expr:
     """Aggregate values whose paired index falls within the given ranges.
 
@@ -251,20 +254,31 @@ def agg_slices(
     are skipped (pairwise with their index), while NaN is a legitimate
     float value — it poisons `sum`/`mean`/`std`, is skipped by
     `min`/`max` unless all values are NaN, and sorts as the largest
-    value for `median`. An empty selection yields null (`count`: 0,
-    `sum`: 0.0). NaN indices never match any range; mismatched list
-    lengths raise.
+    value for `median`. NaN indices never match any range; mismatched
+    list lengths raise.
 
     `std` is the sample standard deviation (ddof=1, polars' default)
     and yields null for selections with fewer than two values.
+
+    An empty selection — no element's index fell in range — yields
+    null, except `count`, which yields 0. `empty` decides the one
+    aggregation where the two conventions disagree:
+
+    - `"null"` (default): summing nothing is unknown, not zero. An
+      empty selection usually means a misconfigured range, and a real
+      `0.0` disguises that as a measurement — the dangerous direction
+      for a feature feeding a threshold.
+    - `"zero"`: polars' convention, the identity element of addition.
+      Equivalent to `.fill_null(0.0)` on the default, and the setting
+      to use when this must agree with `explode().group_by().sum()`.
 
     Range bounds accept anything `float()` converts, and the explicit
     form may be given as tuples or lists (so ranges loaded from JSON
     work as-is).
 
-    With `strict=True`, inverted (`lo > hi`) or NaN range bounds raise
-    at expression construction; the default keeps them as legitimately
-    empty selections.
+    With `strict=True` (the default), inverted (`lo > hi`) or NaN range
+    bounds raise at expression construction. Pass `strict=False` to
+    keep them as legitimately empty selections.
     """
     return _plugin(
         "agg_slices",
@@ -272,11 +286,14 @@ def agg_slices(
         aggregation=aggregation,
         slices_include=_normalize_ranges(slices_include, "slices_include", strict),
         slices_exclude=_normalize_ranges(slices_exclude, "slices_exclude", strict),
+        empty=empty,
     )
 
 
 _AGGS: dict[str, Callable[[pl.Expr], pl.Expr]] = {
-    "sum": pl.Expr.sum,
+    # polars' own sum of nothing is 0.0; `empty="null"` restores the
+    # "no values, no answer" reading by guarding on the non-null count.
+    "sum": lambda e: pl.when(e.count() > 0).then(e.sum()),
     "mean": pl.Expr.mean,
     "median": pl.Expr.median,
     "std": pl.Expr.std,
@@ -286,13 +303,19 @@ _AGGS: dict[str, Callable[[pl.Expr], pl.Expr]] = {
     "count": lambda e: e.count().cast(pl.Float64),
 }
 
+_AGGS_EMPTY_ZERO: dict[str, Callable[[pl.Expr], pl.Expr]] = {
+    **_AGGS,
+    "sum": pl.Expr.sum,
+}
+
 
 def agg_lists(
     list_column: IntoExprColumn,
     *,
     list_length: int,
     aggregation: Aggregation,
-    strict: bool = False,
+    empty: Empty = "null",
+    strict: bool = True,
 ) -> pl.Expr:
     """Aggregate a list-type column elementwise over rows.
 
@@ -302,15 +325,17 @@ def agg_lists(
     group. Lists shorter than `list_length` contribute nulls at the
     missing positions.
 
-    Lists longer than `list_length` are silently truncated to it — a
-    deliberate window for some callers. With `strict=True` such rows
-    raise instead.
+    With `strict=True` (the default), lists longer than `list_length`
+    raise. Pass `strict=False` to keep the silent truncation, which
+    some callers want as a deliberate window.
 
     Implemented in pure polars (no plugin), so missing data follows the
     polars convention exactly as in :func:`agg_slices`: null elements
-    are skipped (`count` counts non-null values, an all-null position
-    sums to 0.0), NaN propagates per-kernel, and `std` is the sample
-    standard deviation (ddof=1).
+    are skipped (`count` counts non-null values), NaN propagates
+    per-kernel, and `std` is the sample standard deviation (ddof=1).
+    `empty` decides what an all-null position sums to — null by
+    default, `0.0` under `empty="zero"` — exactly as in
+    :func:`agg_slices`.
     """
     if list_length < 1:
         raise ValueError(f"list_length must be at least 1, got {list_length}")
@@ -319,7 +344,7 @@ def agg_lists(
         # Pure polars cannot raise from inside an expression, so the
         # length check rides along as an elementwise pass-through plugin.
         col = _plugin("check_list_len", [col], list_length=list_length)
-    agg = _AGGS[aggregation]
+    agg = (_AGGS if empty == "null" else _AGGS_EMPTY_ZERO)[aggregation]
     return pl.concat_list(
         agg(col.list.slice(offset=n, length=1).list.first())
         for n in range(list_length)

@@ -16,12 +16,31 @@ pub(crate) enum Aggregation {
     Count,
 }
 
+/// What an empty selection yields for `sum`, the only aggregation with
+/// a non-null identity element.
+///
+/// Every other aggregation yields null over nothing under either
+/// setting, and `count` yields 0 under either, so this switch reaches
+/// exactly one cell of the matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Empty {
+    /// Summing nothing is unknown, not zero: the safer reading when an
+    /// empty selection usually means a misconfigured range.
+    #[default]
+    Null,
+    /// Polars' convention: the identity element of addition.
+    Zero,
+}
+
 impl Aggregation {
     pub(crate) fn apply(
         &self,
         values: &[f64],
+        empty: Empty,
     ) -> Option<f64> {
         match self {
+            Self::Sum if values.is_empty() && empty == Empty::Zero => Some(0.0),
             Self::Sum => values.sum(),
             Self::Mean => values.mean(),
             Self::Median => values.median(),
@@ -86,10 +105,21 @@ pub(crate) trait Statistic {
         self.values().is_empty()
     }
 
-    /// Sum from the `+0.0` identity, so an empty selection and an
-    /// all-`-0.0` one both read `+0.0`, as polars does. (Rust's
-    /// `Iterator::sum` folds from IEEE's `-0.0` identity instead.)
+    /// Sum of the selected values, or null when nothing was selected.
+    ///
+    /// A deliberate deviation from polars, which returns its identity
+    /// element `0.0` there: summing nothing is not the same as summing
+    /// to zero, and reporting a real zero for absent data is the more
+    /// dangerous of the two errors. `count` keeps polars' `0`, which is
+    /// the semantically correct answer to "how many values".
+    ///
+    /// A non-empty selection folds from `+0.0`, so an all-`-0.0` one
+    /// reads `+0.0` as polars does; Rust's `Iterator::sum` would fold
+    /// from IEEE's `-0.0` identity instead.
     fn sum(&self) -> Option<f64> {
+        if self.is_empty() {
+            return None;
+        }
         Some(self.values().iter().fold(0.0, |acc, &v| acc + v))
     }
 
