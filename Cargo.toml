@@ -10,7 +10,18 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.26", features = ["extension-module", "abi3-py310"] }
 pyo3-polars = { version = "0.25", features = ["derive"] }
-polars = { version = "0.52", default-features = false, features = ["dtype-array"] }
+# Every dtype a caller can put in a list column must be compiled in:
+# polars reconstructs the Series across the plugin's arrow-FFI boundary
+# before any of our code runs, and a dtype whose feature is missing
+# panics there rather than erroring (the same root cause as the Array
+# process-abort these features were first enabled for).
+polars = { version = "0.52", default-features = false, features = [
+    "dtype-array",
+    "dtype-i8",
+    "dtype-i16",
+    "dtype-u8",
+    "dtype-u16",
+] }
 serde = { version = "1", features = ["derive"] }
 realfft = "3.4.0"
 butterworth = "0.1.0"

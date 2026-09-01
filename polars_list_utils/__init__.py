@@ -1,9 +1,11 @@
 """Polars expression plugins for signal processing on list columns.
 
-Six Rust plugins operating elementwise, plus one pure-polars helper. The
-four original functions take `List[f64]` (anything numeric is cast to
-it); :func:`zip_binary` and :func:`cum_agg_runs` instead take float or
-Boolean inners as their operands require, and preserve `Float32`:
+Six elementwise Rust plugins, plus :func:`agg_lists`, which composes
+polars' own vertical aggregations (with a small pass-through plugin to
+prepare its input). The four original functions take `List[f64]`
+(anything numeric is cast to it); :func:`zip_binary` and
+:func:`cum_agg_runs` instead take float or Boolean inners as their
+operands require, and preserve `Float32`:
 
 - :func:`apply_interp`: interpolate (x, y) data onto new x coordinates.
 - :func:`apply_butterworth`: zero-phase Butterworth filtering.
@@ -18,11 +20,13 @@ length-preserving function returns the container it was given —
 `apply_fft` narrows an `Array(w)` to `Array(w // 2 + 1)`, and
 `apply_interp` follows its `xp` argument, since that is what decides the
 output's shape. `zip_binary` returns an `Array` only when both operands
-are `Array`s of equal width, which the schema settles before execution;
-a mixed pair is allowed and gives a `List`. Two exceptions:
-:func:`agg_slices` reduces to a scalar, and :func:`agg_lists` always
-returns a `List`, being an expression composition that never sees its
-input's schema. Zero-width `Array`s are rejected — polars panics when
+are `Array`s, since both are operands; `cum_agg_runs` follows its value
+column alone, its gate being a mask rather than an operand. Paired
+inputs that must agree element-for-element have their widths checked
+before execution when both are `Array`s, and per row otherwise. Two
+exceptions to container propagation: :func:`agg_slices` reduces to a
+scalar, and :func:`agg_lists` always returns a `List`, being an
+expression composition that never sees its input's schema. Zero-width `Array`s are rejected — polars panics when
 slicing them — while zero-length `List`s are fine.
 
 The plugins accept length-1 literal list columns (e.g. `pl.lit(...)`)
@@ -364,21 +368,34 @@ def agg_lists(
 
     For use in a group_by/aggregation context: element n of the result
     is `aggregation` applied vertically to element n of every list in
-    the group, giving one `List[f64]` of length `list_length` per
-    group. Lists shorter than `list_length` contribute nulls at the
-    missing positions.
+    the group, giving one `List` of length `list_length` per group.
+    The result is always a `List`, even for `Array` input: this is an
+    expression composition rather than a plugin, because it reduces many
+    rows to one, and an expression is built before any schema is
+    resolved — so the container to return is not knowable here.
 
-    With `strict=True` (the default), lists longer than `list_length`
-    raise. Pass `strict=False` to keep the silent truncation, which
-    some callers want as a deliberate window.
+    `List` rows shorter than `list_length` contribute nulls at the
+    missing positions. An `Array` input must instead match `list_length`
+    exactly, since its width is fixed for every row and a mismatch is
+    therefore a configuration error rather than data; it raises, under
+    `strict` or not.
 
-    Implemented in pure polars (no plugin), so missing data follows the
-    polars convention exactly as in :func:`agg_slices`: null elements
-    are skipped (`count` counts non-null values), NaN propagates
-    per-kernel, and `std` is the sample standard deviation (ddof=1).
-    `empty` decides what an all-null position sums to — null by
-    default, `0.0` under `empty="zero"` — exactly as in
-    :func:`agg_slices`.
+    With `strict=True` (the default), `List` rows carrying non-null data
+    past `list_length` raise. Pass `strict=False` to keep the silent
+    truncation, which some callers want as a deliberate window. A
+    null-padded tail is never a violation: every aggregation skips
+    nulls, so truncating it loses nothing.
+
+    The aggregations are polars' own, so missing data follows the polars
+    convention exactly as in :func:`agg_slices`: null elements are
+    skipped (`count` counts non-null values), NaN propagates per-kernel,
+    and `std` is the sample standard deviation (ddof=1). `empty` decides
+    what an all-null position sums to — null by default, `0.0` under
+    `empty="zero"` — exactly as in :func:`agg_slices`.
+
+    A small pass-through plugin runs first, to normalize the container
+    and carry the checks above; polars' `.list` namespace rejects
+    `Array` outright, and an expression cannot raise from inside itself.
     """
     if list_length < 1:
         raise ValueError(f"list_length must be at least 1, got {list_length}")

@@ -1,4 +1,6 @@
-use crate::util::{Container, apply_list_transform, transform_output};
+use crate::util::{
+    Container, apply_list_transform, ensure_equal_widths, transform_output,
+};
 use interp::{InterpMode, interp_slice};
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
@@ -12,8 +14,14 @@ struct InterpKwargs {
 
 /// Shape follows `xp`: the output holds one value per query coordinate,
 /// so the query column decides both length and container. The `x`/`y`
-/// containers are irrelevant.
+/// containers do not reach the output — but they are still split here,
+/// because that is the only thing standing between a zero-width `Array`
+/// and the polars-arrow panic, and because an `x`/`y` width mismatch is
+/// decidable from the schema.
 fn interp_output(input_fields: &[Field]) -> PolarsResult<Field> {
+    let (x, _) = Container::split(input_fields[0].dtype(), "apply_interp: x_column")?;
+    let (y, _) = Container::split(input_fields[1].dtype(), "apply_interp: y_column")?;
+    ensure_equal_widths(x, y, "apply_interp: x and y Arrays must have equal widths")?;
     transform_output(input_fields, 2, "apply_interp: xp_column", |w| w)
 }
 

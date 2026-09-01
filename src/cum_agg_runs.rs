@@ -1,6 +1,7 @@
 use crate::statistic::{Aggregation, Statistic, max_fold, midpoint, min_fold};
 use crate::util::{
-    Container, TypedListInput, broadcast_len, build_float_list, build_u32_list, tot_cmp,
+    Container, TypedListInput, broadcast_len, build_float_list, build_u32_list,
+    ensure_equal_widths, tot_cmp,
 };
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
@@ -203,13 +204,14 @@ fn run_container(
     values: Container,
     gates: Container,
 ) -> PolarsResult<Container> {
-    if let (Container::Array(vw), Container::Array(gw)) = (values, gates) {
-        polars_ensure!(
-            vw == gw,
-            ComputeError:
-            "cum_agg_runs: value and gate Arrays must have equal widths, got {vw} and {gw}"
-        );
-    }
+    ensure_equal_widths(
+        values,
+        gates,
+        "cum_agg_runs: value and gate Arrays must have equal widths",
+    )?;
+    // The gate is a mask, not a symmetric operand, so the value column
+    // alone decides the output shape -- unlike zip_binary, where both
+    // sides are operands and an Array result needs both to be Arrays.
     Ok(values)
 }
 

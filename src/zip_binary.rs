@@ -1,5 +1,6 @@
 use crate::util::{
-    Container, TypedListInput, broadcast_len, build_bool_list, build_float_list, tot_cmp,
+    Container, TypedListInput, broadcast_len, build_bool_list, build_float_list,
+    ensure_equal_widths, tot_cmp,
 };
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
@@ -168,17 +169,15 @@ fn zip_container(
     left: Container,
     right: Container,
 ) -> PolarsResult<Container> {
-    match (left, right) {
-        (Container::Array(lw), Container::Array(rw)) => {
-            polars_ensure!(
-                lw == rw,
-                ComputeError:
-                "zip_binary: Array operands must have equal widths, got {lw} and {rw}"
-            );
-            Ok(Container::Array(lw))
-        }
-        _ => Ok(Container::List),
-    }
+    ensure_equal_widths(
+        left,
+        right,
+        "zip_binary: Array operands must have equal widths",
+    )?;
+    Ok(match (left, right) {
+        (Container::Array(w), Container::Array(_)) => Container::Array(w),
+        _ => Container::List,
+    })
 }
 
 fn zip_binary_output(

@@ -46,13 +46,16 @@ impl Container {
         dtype: &DataType,
         label: &str,
     ) -> PolarsResult<(Self, DataType)> {
+        // Nested too: `Array(Float64, (2, 0))` is `Array(Array(Float64,
+        // 0), 2)`, whose outer width is a perfectly innocent 2.
+        polars_ensure!(
+            !has_zero_width_array(dtype),
+            ComputeError:
+            "{label}: zero-width Arrays are not supported (polars panics when \
+            slicing them); use a List column for zero-length rows, got {dtype}"
+        );
         match dtype {
             DataType::List(inner) => Ok((Self::List, (**inner).clone())),
-            DataType::Array(_, 0) => polars_bail!(
-                ComputeError:
-                "{label}: zero-width Arrays are not supported (polars panics when \
-                slicing them); use a List column for zero-length rows"
-            ),
             DataType::Array(inner, width) => Ok((Self::Array(*width), (**inner).clone())),
             dt => polars_bail!(
                 ComputeError: "{label} must be a List or Array column, got {dt}"
@@ -70,6 +73,30 @@ impl Container {
             Self::Array(w) => DataType::Array(Box::new(inner), w),
         }
     }
+}
+
+/// Whether a zero-width `Array` appears at any nesting depth.
+fn has_zero_width_array(dtype: &DataType) -> bool {
+    match dtype {
+        DataType::Array(_, 0) => true,
+        DataType::Array(inner, _) | DataType::List(inner) => has_zero_width_array(inner),
+        _ => false,
+    }
+}
+
+/// Equal-width validation for a pair of inputs that must agree
+/// element-for-element. Two `Array`s carry their widths in the schema,
+/// so a mismatch raises before execution; any other pairing is checked
+/// per row inside the kernel.
+pub(crate) fn ensure_equal_widths(
+    left: Container,
+    right: Container,
+    message: &str,
+) -> PolarsResult<()> {
+    if let (Container::Array(lw), Container::Array(rw)) = (left, right) {
+        polars_ensure!(lw == rw, ComputeError: "{message}, got {lw} and {rw}");
+    }
+    Ok(())
 }
 
 /// Normalize an `Array` column to the equivalent `List` column, so

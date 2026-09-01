@@ -1412,9 +1412,11 @@ dependencies = [
  "polars-compute",
  "polars-core",
  "polars-error",
+ "polars-io",
  "polars-lazy",
  "polars-ops",
  "polars-plan",
+ "polars-time",
  "polars-utils",
  "version_check",
 ]

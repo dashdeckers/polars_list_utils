@@ -210,6 +210,146 @@ def test_integer_arrays_raise_for_the_dtype_strict_functions():
 
 # ------------------------------------------------------------- zero-width edge
 
+ZERO_WIDTH_POSITIONS = {
+    # Every position that accepts a container needs its own case: the
+    # guard lives in each function's plan-time output resolution, so a
+    # position left out of that resolution is a position that panics.
+    "interp_x": lambda z, ok: pl.DataFrame(
+        {"z": z, "a": ok}
+    ).select(polist.apply_interp("z", "a", "a")),
+    "interp_y": lambda z, ok: pl.DataFrame(
+        {"z": z, "a": ok}
+    ).select(polist.apply_interp("a", "z", "a")),
+    "interp_xp": lambda z, ok: pl.DataFrame(
+        {"z": z, "a": ok}
+    ).select(polist.apply_interp("a", "a", "z")),
+    "fft": lambda z, ok: pl.DataFrame({"z": z}).select(
+        polist.apply_fft("z", sample_rate=FS)
+    ),
+    "butterworth": lambda z, ok: pl.DataFrame({"z": z}).select(
+        polist.apply_butterworth("z", sample_rate=FS, max_freq=50.0)
+    ),
+    "agg_slices_value": lambda z, ok: pl.DataFrame({"z": z, "a": ok}).select(
+        polist.agg_slices("z", "a", aggregation="count")
+    ),
+    "agg_slices_index": lambda z, ok: pl.DataFrame({"z": z, "a": ok}).select(
+        polist.agg_slices("a", "z", aggregation="count")
+    ),
+    "zip_left": lambda z, ok: pl.DataFrame({"z": z, "a": ok}).select(
+        polist.zip_binary("z", "a", op="add")
+    ),
+    "zip_right": lambda z, ok: pl.DataFrame({"z": z, "a": ok}).select(
+        polist.zip_binary("a", "z", op="add")
+    ),
+    "cum_value": lambda z, ok: pl.DataFrame(
+        {"z": z, "g": pl.Series("g", [[True, True]], dtype=pl.Array(pl.Boolean, 2))}
+    ).select(polist.cum_agg_runs("z", "g", aggregation="sum")),
+    "cum_gate": lambda z, ok: pl.DataFrame({"a": ok, "z": z}).select(
+        polist.cum_agg_runs("a", "z", aggregation="sum")
+    ),
+    "agg_lists": lambda z, ok: pl.DataFrame({"g": [1], "z": z})
+    .group_by("g")
+    .agg(polist.agg_lists("z", list_length=1, aggregation="mean")),
+}
+
+
+@pytest.mark.parametrize("position", list(ZERO_WIDTH_POSITIONS))
+def test_zero_width_arrays_raise_in_every_position(position):
+    z = pl.Series("z", [[]], dtype=pl.Array(pl.Float64, 0))
+    ok = pl.Series("a", [[1.0, 2.0]], dtype=pl.Array(pl.Float64, 2))
+    with pytest.raises(polars.exceptions.PolarsError) as excinfo:
+        ZERO_WIDTH_POSITIONS[position](z, ok)
+    message = str(excinfo.value)
+    assert "zero-width Arrays are not supported" in message, message
+    assert "the plugin panicked" not in message, message
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pl.Array(pl.Float64, (2, 0)),  # Array(Array(Float64, 0), 2)
+        pl.List(pl.Array(pl.Float64, 0)),
+    ],
+)
+def test_nested_zero_width_arrays_raise(dtype):
+    # The outer width is innocent, so a top-level-only check waves these
+    # through and the inner zero width panics inside polars-arrow.
+    df = pl.DataFrame({"a": pl.Series("a", [[[], []]], dtype=dtype)})
+    with pytest.raises(polars.exceptions.PolarsError) as excinfo:
+        df.select(polist.apply_fft("a", sample_rate=FS))
+    message = str(excinfo.value)
+    assert "zero-width Arrays are not supported" in message, message
+    assert "the plugin panicked" not in message, message
+
+
+@pytest.mark.parametrize(
+    ("build", "match"),
+    [
+        (
+            lambda: polist.apply_interp("x", "y", pl.lit([0.5])),
+            "x and y Arrays must have equal widths",
+        ),
+        (
+            lambda: polist.agg_slices("x", "y", aggregation="mean"),
+            "value and index Arrays must have equal widths",
+        ),
+    ],
+)
+def test_paired_array_widths_are_checked_at_plan_time(build, match):
+    # All four paired equal-length requirements resolve from the schema
+    # when both sides are Arrays, so none of them waits for rows.
+    lf = pl.LazyFrame(
+        {"x": [[1.0, 2.0, 3.0]], "y": [[1.0, 2.0]]},
+        schema={"x": pl.Array(pl.Float64, 3), "y": pl.Array(pl.Float64, 2)},
+    )
+    with pytest.raises(polars.exceptions.PolarsError, match=match):
+        lf.select(build()).collect_schema()
+
+
+def test_mixed_container_length_mismatch_is_a_runtime_error():
+    # A List against an Array cannot be settled from the schema, so the
+    # per-row check has to catch it.
+    df = pl.DataFrame(
+        {"a": [[1.0, 2.0]], "b": [[1.0, 2.0, 3.0]]},
+        schema={"a": pl.Array(pl.Float64, 2), "b": pl.List(pl.Float64)},
+    )
+    with pytest.raises(polars.exceptions.PolarsError, match="differ in length"):
+        df.select(polist.zip_binary("a", "b", op="add"))
+
+
+def test_cum_agg_runs_follows_the_value_column_not_both():
+    # Deliberately unlike zip_binary: the gate is a mask, not an operand,
+    # so a List gate does not demote an Array value column.
+    array_value = pl.DataFrame(
+        {"v": [[1.0, 2.0]], "g": [[True, True]]},
+        schema={"v": pl.Array(pl.Float64, 2), "g": pl.List(pl.Boolean)},
+    )
+    assert array_value.select(
+        polist.cum_agg_runs("v", "g", aggregation="sum").alias("r")
+    )["r"].dtype == pl.Array(pl.Float64, 2)
+
+    list_value = pl.DataFrame(
+        {"v": [[1.0, 2.0]], "g": [[True, True]]},
+        schema={"v": pl.List(pl.Float64), "g": pl.Array(pl.Boolean, 2)},
+    )
+    assert list_value.select(
+        polist.cum_agg_runs("v", "g", aggregation="sum").alias("r")
+    )["r"].dtype == pl.List(pl.Float64)
+
+
+@pytest.mark.parametrize(
+    "inner", [pl.Int8, pl.Int16, pl.UInt8, pl.UInt16, pl.Int32, pl.Int64]
+)
+def test_narrow_integer_inners_do_not_panic(inner):
+    # polars gates the narrow integer dtypes behind cargo features, and
+    # reconstructs the Series across the FFI boundary before any of this
+    # library's code runs -- so a missing feature panics there, exactly
+    # as the Array dtype once did.
+    df = pl.DataFrame({"a": [[1, 2, 3, 4]]}, schema={"a": pl.List(inner)})
+    out = df.select(polist.agg_slices("a", "a", aggregation="sum").alias("r"))
+    assert out["r"][0] == 10.0
+
+
 @pytest.mark.parametrize(
     "build",
     [

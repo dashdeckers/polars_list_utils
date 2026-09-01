@@ -1,6 +1,6 @@
 use crate::slice::{Range, Slice};
 use crate::statistic::{Aggregation, Empty};
-use crate::util::{Container, ListInputs};
+use crate::util::{Container, ListInputs, ensure_equal_widths};
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
@@ -19,9 +19,15 @@ struct AggSlicesKwargs {
 /// `Array` from reaching the FFI boundary, where polars would panic
 /// rather than raise.
 fn agg_slices_output(input_fields: &[Field]) -> PolarsResult<Field> {
-    for (field, label) in input_fields.iter().zip(["value_column", "index_column"]) {
-        Container::split(field.dtype(), &format!("agg_slices: {label}"))?;
-    }
+    let (values, _) =
+        Container::split(input_fields[0].dtype(), "agg_slices: value_column")?;
+    let (indices, _) =
+        Container::split(input_fields[1].dtype(), "agg_slices: index_column")?;
+    ensure_equal_widths(
+        values,
+        indices,
+        "agg_slices: value and index Arrays must have equal widths",
+    )?;
     Ok(Field::new(PlSmallStr::from(""), DataType::Float64))
 }
 
