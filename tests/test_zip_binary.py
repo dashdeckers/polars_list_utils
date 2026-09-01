@@ -1,7 +1,9 @@
 """zip_binary: per element the result must be identical to the
 corresponding scalar polars op -- the deference doctrine, executable."""
 import math
+import struct
 
+import numpy as np
 import polars as pl
 import polars.exceptions
 import pytest
@@ -30,16 +32,27 @@ FLOAT_OPS = {
 }
 
 
+def bits(v: float) -> bytes:
+    """The IEEE bit pattern, so -0.0 != 0.0 and a NaN's sign is visible."""
+    return struct.pack("<d", v)
+
+
 def assert_row_matches(got: list, expected: list, ctx: str) -> None:
+    # Element-wise ops are exact, so this compares bit patterns rather
+    # than values: the adversarial pairs below include signed zeros and
+    # NaNs of both signs, whose whole point a magnitude comparison
+    # cannot see (-0.0 == 0.0, and every NaN equals every other).
     assert len(got) == len(expected), ctx
     for j, (g, e) in enumerate(zip(got, expected)):
-        where = f"{ctx}, position {j}: got {g}, expected {e}"
+        where = f"{ctx}, position {j}: got {g!r}, expected {e!r}"
         if e is None:
             assert g is None, where
         elif isinstance(e, float) and math.isnan(e):
             assert g is not None and math.isnan(g), where
+        elif isinstance(e, bool):
+            assert g == e, where
         else:
-            assert g == pytest.approx(e), where
+            assert g is not None and bits(g) == bits(e), where
 
 
 @pytest.mark.parametrize("op", list(FLOAT_OPS))
@@ -80,6 +93,38 @@ def test_kleene_and_or_match_polars():
             polist.zip_binary("a", "b", op=op).alias("r")  # ty: ignore[invalid-argument-type]
         )["r"][0].to_list()
         assert got == expected, op
+
+
+@pytest.mark.parametrize("op", list(FLOAT_OPS))
+def test_float32_values_match_polars_scalar_op(op):
+    # The f32 path computes in f64 and rounds once at the exit cast,
+    # while polars computes natively in f32. For +,-,*,/ double rounding
+    # is provably innocuous, and this pins that the entry/exit casts do
+    # not perturb values, NaNs or infinities.
+    a32 = [float(np.float32(v)) if v is not None else None for v in A]
+    b32 = [float(np.float32(v)) if v is not None else None for v in B]
+    flat = pl.DataFrame(
+        {"a": a32, "b": b32}, schema={"a": pl.Float32, "b": pl.Float32}
+    )
+    expected = flat.select(
+        FLOAT_OPS[op](pl.col("a"), pl.col("b")).alias("r")
+    )["r"].to_list()
+    df = pl.DataFrame(
+        {"a": [a32], "b": [b32]},
+        schema={"a": pl.List(pl.Float32), "b": pl.List(pl.Float32)},
+    )
+    got = df.select(polist.zip_binary("a", "b", op=op).alias("r"))["r"][0].to_list()
+    assert len(got) == len(expected), op
+    for j, (g, e) in enumerate(zip(got, expected)):
+        where = f"f32 {op}, position {j}: got {g!r}, expected {e!r}"
+        if e is None:
+            assert g is None, where
+        elif isinstance(e, float) and math.isnan(e):
+            assert g is not None and math.isnan(g), where
+        elif isinstance(e, bool):
+            assert g == e, where
+        else:
+            assert struct.pack("<f", g) == struct.pack("<f", e), where
 
 
 def test_comparison_output_is_boolean():
@@ -164,6 +209,64 @@ def test_literal_broadcasts_as_constant_template():
         polist.zip_binary("a", pl.lit([10.0, 20.0]), op="add").alias("r")
     )
     assert out["r"].to_list() == [[11.0, 22.0], [13.0, 24.0]]
+
+
+def test_left_side_literal_broadcasts():
+    # The other side of the broadcasting axis; subtraction is not
+    # commutative, so this also pins the operand order.
+    df = pl.DataFrame({"b": [[1.0, 2.0], [3.0, 4.0]]})
+    out = df.select(
+        polist.zip_binary(pl.lit([10.0, 20.0]), "b", op="sub").alias("r")
+    )
+    assert out["r"].to_list() == [[9.0, 18.0], [7.0, 16.0]]
+
+
+def test_broadcast_literal_length_mismatch_raises():
+    df = pl.DataFrame({"a": [[1.0, 2.0], [3.0]]})
+    with pytest.raises(polars.exceptions.PolarsError, match="differ in length"):
+        df.select(polist.zip_binary("a", pl.lit([1.0, 2.0]), op="add"))
+
+
+@pytest.mark.parametrize(
+    ("op", "left", "right", "dtype"),
+    [
+        ("and", [[True], None], [None, [True]], pl.Boolean),
+        ("or", [[True], None], [None, [True]], pl.Boolean),
+        ("gt", [[1.0], None], [None, [1.0]], pl.Float64),
+        ("eq", [[1.0], None], [None, [1.0]], pl.Float64),
+    ],
+)
+def test_null_rows_stay_null_on_every_path(op, left, right, dtype):
+    df = pl.DataFrame(
+        {"a": left, "b": right},
+        schema={"a": pl.List(dtype), "b": pl.List(dtype)},
+    )
+    out = df.select(polist.zip_binary("a", "b", op=op).alias("r"))
+    assert out["r"].to_list() == [None, None]
+
+
+@pytest.mark.parametrize(
+    ("op", "dtype"),
+    [("and", pl.Boolean), ("or", pl.Boolean), ("gt", pl.Float64), ("mul", pl.Float64)],
+)
+def test_empty_lists_zip_to_empty_on_every_path(op, dtype):
+    df = pl.DataFrame(
+        {"a": [[]], "b": [[]]},
+        schema={"a": pl.List(dtype), "b": pl.List(dtype)},
+    )
+    out = df.select(polist.zip_binary("a", "b", op=op).alias("r"))
+    assert out["r"][0].to_list() == []
+
+
+def test_array_input_raises_cleanly():
+    # PR 0 exists because an Array input used to abort the process; the
+    # new plugins must also produce a catchable typed error.
+    df = pl.DataFrame(
+        {"a": [[1.0, 2.0]], "b": [[3.0, 4.0]]},
+        schema={"a": pl.Array(pl.Float64, 2), "b": pl.Array(pl.Float64, 2)},
+    )
+    with pytest.raises(polars.exceptions.PolarsError, match="List column"):
+        df.select(polist.zip_binary("a", "b", op="add"))
 
 
 @pytest.mark.parametrize("engine", ["in-memory", "streaming"])

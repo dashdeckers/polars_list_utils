@@ -1,7 +1,10 @@
 """Polars expression plugins for signal processing on List columns.
 
-Six Rust plugins operating elementwise on `List[f64]` columns, plus
-one pure-polars helper:
+Six Rust plugins operating elementwise on List columns, plus one
+pure-polars helper. The four original functions take `List[f64]`
+(anything numeric is cast to it); :func:`zip_binary` and
+:func:`cum_agg_runs` instead take float or Boolean inners as their
+operands require, and preserve `Float32`:
 
 - :func:`apply_interp`: interpolate (x, y) data onto new x coordinates.
 - :func:`apply_butterworth`: zero-phase Butterworth filtering.
@@ -29,7 +32,7 @@ Missing data follows three deliberate family regimes:
 import math
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import polars as pl
 from polars.plugins import register_plugin_function
@@ -106,10 +109,12 @@ def apply_interp(
     values outside the data range clamped to the first/last `y` value.
     `x` must be sorted in increasing order.
 
-    With `strict=True` a row whose `x` values are not non-decreasing
-    raises (duplicates stay legal, as in numpy; a NaN in `x` counts as
-    a violation). The default keeps numpy's silent behaviour: unsorted
-    `x` interpolates garbage without complaint.
+    With `strict=True` a row whose `x` values descend raises
+    (duplicates stay legal, as in numpy). The default keeps numpy's
+    silent behaviour: unsorted `x` interpolates garbage without
+    complaint. A NaN in `x` is a legitimate float either way and
+    propagates into the output rather than raising — the check exists
+    for the failure you cannot see, not the one you can.
 
     Returns a `List[f64]` column of interpolated y values, one per
     `xp` coordinate. Raises if x and y lists differ in length.
@@ -183,17 +188,44 @@ def apply_fft(
     )
 
 
-def _validate_ranges(ranges: list[Range] | None, param: str) -> None:
-    """Raise on inverted or NaN range bounds (agg_slices strict=True)."""
-    for r in ranges or []:
-        lo, hi = r
-        lo_value = float(lo[0]) if isinstance(lo, tuple) else float(lo)
-        hi_value = float(hi[0]) if isinstance(hi, tuple) else float(hi)
-        if math.isnan(lo_value) or math.isnan(hi_value) or lo_value > hi_value:
+def _normalize_ranges(
+    ranges: list[Range] | None, param: str, strict: bool
+) -> list[Range] | None:
+    """Rebuild `ranges` into fresh plain-float tuples, validating under strict.
+
+    The rebuild is not cosmetic. The plugin receives kwargs as a pickle,
+    and its decoder cannot resolve a memoized *container* back-reference:
+    any range object (or bound tuple, or the range list itself) that
+    appears twice — as CPython's constant folding arranges for a literal
+    like `((1.0, "closed"), (1.0, "closed"))` — would otherwise fail the
+    query with "recursive structure found". Fresh objects are never
+    pickled twice. Coercing bounds with `float()` likewise keeps numpy
+    scalars, which the decoder cannot resolve either, off the wire.
+    """
+    if ranges is None:
+        return None
+
+    def bound(b: Any) -> tuple[float, str] | float:
+        # Explicit ((value, mode)) form, as a tuple or (from JSON) a list.
+        if isinstance(b, (tuple, list)):
+            value, mode = b
+            return (float(value), str(mode))
+        return float(b)
+
+    out: list[Range] = []
+    for r in ranges:
+        lo, hi = (bound(b) for b in r)
+        lo_value = lo[0] if isinstance(lo, tuple) else lo
+        hi_value = hi[0] if isinstance(hi, tuple) else hi
+        if strict and (
+            math.isnan(lo_value) or math.isnan(hi_value) or lo_value > hi_value
+        ):
             raise ValueError(
                 f"agg_slices: invalid range {r!r} in {param} (strict=True): "
                 "bounds must be non-NaN with lo <= hi"
             )
+        out.append((lo, hi))  # ty: ignore[invalid-argument-type]
+    return out
 
 
 def agg_slices(
@@ -212,8 +244,10 @@ def agg_slices(
     `slices_exclude` range, then aggregates them into a `Float64`.
     Omitting `slices_include` includes everything.
 
-    Missing data follows the polars convention, so results match
-    polars' vertical aggregations over the same values: null elements
+    Missing data follows the polars convention, so results follow
+    polars' vertical aggregations over the same values (semantically —
+    floating-point accumulation order differs, so agreement is to
+    rounding, not bit-for-bit): null elements
     are skipped (pairwise with their index), while NaN is a legitimate
     float value — it poisons `sum`/`mean`/`std`, is skipped by
     `min`/`max` unless all values are NaN, and sorts as the largest
@@ -224,19 +258,20 @@ def agg_slices(
     `std` is the sample standard deviation (ddof=1, polars' default)
     and yields null for selections with fewer than two values.
 
+    Range bounds accept anything `float()` converts, and the explicit
+    form may be given as tuples or lists (so ranges loaded from JSON
+    work as-is).
+
     With `strict=True`, inverted (`lo > hi`) or NaN range bounds raise
     at expression construction; the default keeps them as legitimately
     empty selections.
     """
-    if strict:
-        _validate_ranges(slices_include, "slices_include")
-        _validate_ranges(slices_exclude, "slices_exclude")
     return _plugin(
         "agg_slices",
         [value_column, index_column],
         aggregation=aggregation,
-        slices_include=slices_include,
-        slices_exclude=slices_exclude,
+        slices_include=_normalize_ranges(slices_include, "slices_include", strict),
+        slices_exclude=_normalize_ranges(slices_exclude, "slices_exclude", strict),
     )
 
 
@@ -338,8 +373,23 @@ def cum_agg_runs(
     emits the `outside` fill (`"null"`, or `"zero"` for a plain 0 in
     the output dtype). Within a run, each emitted element equals the
     vertical `aggregation` over the run's elements so far — so with an
-    all-`True` gate, `sum`/`min`/`max`/`count` match polars'
-    `cum_sum`/`cum_min`/`cum_max`/`cum_count`.
+    all-`True` gate over `Float64` values, `sum`/`min`/`max`/`count`
+    track polars' `cum_sum`/`cum_min`/`cum_max`/`cum_count`, with two
+    documented exceptions:
+
+    - `cum_min`/`cum_max` fold from ∓`f64::MAX` and never replace that
+      seed on a tie, so they emit ±1.7976931348623157e+308 wherever the
+      prefix is all-NaN or opens with an infinity of the same sign.
+      This function follows the prefix rule and emits the true prefix
+      minimum or maximum (NaN, or that infinity).
+    - `Float32` values accumulate in `f64` and round once at the output
+      boundary, while polars rounds every step, so the two can differ
+      in the last bits and around the `Float32` range limit (where this
+      function can stay finite as polars overflows to infinity).
+
+    Floating-point accumulation order differs from polars generally, so
+    treat the correspondence as one of semantics — missing data, NaN,
+    dtype and ddof rules — rather than bit-exact equality.
 
     Missing data follows the polars `cum_*` convention: a null value
     leaves the running state unchanged and emits null — except `count`,

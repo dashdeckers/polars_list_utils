@@ -1,4 +1,4 @@
-use crate::statistic::Aggregation;
+use crate::statistic::{Aggregation, Statistic, max_fold, midpoint, min_fold};
 use crate::util::{
     TypedListInput, broadcast_len, build_float_list, build_u32_list, tot_cmp,
 };
@@ -24,18 +24,23 @@ struct CumAggRunsKwargs {
 /// Running state over one gated run's non-null values.
 ///
 /// Every emitted position must equal the vertical aggregation over the
-/// run-prefix's non-null values (the prefix rule): `sum`/`mean`/`std`
-/// let NaN poison the accumulators, `min`/`max` skip NaN via the
-/// NaN-propagating `f64::min`/`max` seeds (all-NaN prefixes read NaN),
-/// `median` keeps a sorted prefix with NaN largest, `count` counts
-/// every non-null value (NaN included).
+/// run-prefix's non-null values (the prefix rule), so `std` and
+/// `median` delegate to the very kernels `agg_slices` uses rather than
+/// keeping independent accumulators: one input, one answer, everywhere
+/// in the library. That costs a retained buffer for those two
+/// aggregations; the rest need O(1) state.
+///
+/// `sum`/`mean` let NaN poison the running sum, `min`/`max` skip NaN
+/// (all-NaN prefixes read NaN) and keep the first of equal values, and
+/// `count` counts every non-null value, NaN included.
 struct RunState {
     n: u64,
     sum: f64,
     min: f64,
     max: f64,
-    mean: f64,
-    m2: f64,
+    /// The run's values in input order, kept for `std` only.
+    values: Vec<f64>,
+    /// The run's values in stable sorted order, kept for `median` only.
     sorted: Vec<f64>,
 }
 
@@ -46,8 +51,7 @@ impl RunState {
             sum: 0.0,
             min: f64::NAN,
             max: f64::NAN,
-            mean: 0.0,
-            m2: 0.0,
+            values: Vec::new(),
             sorted: Vec::new(),
         }
     }
@@ -59,19 +63,20 @@ impl RunState {
     ) {
         self.n += 1;
         self.sum += x;
-        // f64::min/max return the non-NaN operand, so these skip NaN
-        // and read NaN only while every value so far is NaN.
-        self.min = self.min.min(x);
-        self.max = self.max.max(x);
-        // Welford in f64; a NaN poisons mean and m2 for the run's rest.
-        let delta = x - self.mean;
-        self.mean += delta / self.n as f64;
-        self.m2 += delta * (x - self.mean);
-        if agg == Aggregation::Median {
-            let pos = self
-                .sorted
-                .partition_point(|&v| tot_cmp(v, x) == Ordering::Less);
-            self.sorted.insert(pos, x);
+        self.min = min_fold(self.min, x);
+        self.max = max_fold(self.max, x);
+        match agg {
+            Aggregation::Std => self.values.push(x),
+            Aggregation::Median => {
+                // Upper bound: insert *after* equal elements, so the
+                // buffer holds what a stable sort would produce and a
+                // signed-zero tie keeps its input order, as in polars.
+                let pos = self
+                    .sorted
+                    .partition_point(|&v| tot_cmp(v, x) != Ordering::Greater);
+                self.sorted.insert(pos, x);
+            }
+            _ => {}
         }
     }
 
@@ -87,14 +92,12 @@ impl RunState {
             Aggregation::Min => Some(self.min),
             Aggregation::Max => Some(self.max),
             Aggregation::Delta => Some(self.max - self.min),
-            Aggregation::Std => {
-                // Sample std (ddof=1): null below two values, as in polars.
-                (self.n >= 2).then(|| (self.m2 / (self.n - 1) as f64).sqrt())
-            }
+            // Sample std (ddof=1): null below two values, as in polars.
+            Aggregation::Std => self.values.std(),
             Aggregation::Median => {
                 let mid = self.sorted.len() / 2;
                 Some(if self.sorted.len().is_multiple_of(2) {
-                    (self.sorted[mid - 1] + self.sorted[mid]) / 2.0
+                    midpoint(self.sorted[mid - 1], self.sorted[mid])
                 } else {
                     self.sorted[mid]
                 })
@@ -110,16 +113,18 @@ impl RunState {
 /// except `count`, which emits the unchanged running count (as native
 /// `cum_count` does).
 fn scan_row(
-    row_idx: usize,
     values: &[Option<f64>],
     gates: &[Option<bool>],
     agg: Aggregation,
     outside: Outside,
 ) -> PolarsResult<Vec<Option<f64>>> {
+    // No row index: plugins are handed one chunk at a time, so any
+    // position we could name here is chunk-local and would point at a
+    // different, innocent row of the frame.
     polars_ensure!(
         values.len() == gates.len(),
         ComputeError:
-        "cum_agg_runs: value and gate lists differ in length at row {row_idx} ({} vs {})",
+        "cum_agg_runs: a row's value and gate lists differ in length ({} vs {})",
         values.len(), gates.len()
     );
 
@@ -214,7 +219,7 @@ fn cum_agg_runs(
     for i in 0..len {
         rows.push(match (values.row(i), gates.row(i)) {
             (Some(v), Some(g)) => {
-                Some(scan_row(i, v, g, kwargs.aggregation, kwargs.outside)?)
+                Some(scan_row(v, g, kwargs.aggregation, kwargs.outside)?)
             }
             _ => None,
         });

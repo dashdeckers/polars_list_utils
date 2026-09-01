@@ -3,6 +3,7 @@ position, the vertical aggregation (computed by polars) over the run
 prefix's non-null values -- run over an adversarial pattern matrix."""
 import math
 
+import numpy as np
 import polars as pl
 import polars.exceptions
 import pytest
@@ -12,6 +13,8 @@ import polars_list_utils as polist
 NAN = float("nan")
 
 AGGS = ["sum", "mean", "median", "std", "min", "max", "delta", "count"]
+
+INF = float("inf")
 
 VALUE_PATTERNS = [
     [],
@@ -24,7 +27,22 @@ VALUE_PATTERNS = [
     [None, None],
     [NAN, NAN],
     [0.0, -0.0],
+    [-0.0, 0.0],
+    [-0.0, -0.0],
     [1.0, -1.0, 0.0, None, NAN, 3.0, 2.5, -0.5],
+    # Infinities and overflow magnitudes: legitimate floats per spec
+    # 6.1, and the regime where a naive midpoint or an incremental
+    # variance parts company with the vertical kernels.
+    [INF, INF],
+    [-INF, -INF],
+    [1.0, -INF],
+    [-INF, 3.0],
+    [-INF, INF],
+    [1e308, 1e308],
+    [-1e308, 1e308],
+    [1e308, 1e308, 1.0, 2.0],
+    [1e16, 1e16 + 2.0],
+    [INF, 1.0, NAN, -INF, None, 2.0],
 ]
 
 
@@ -44,6 +62,29 @@ def gate_patterns(n: int) -> list[list[bool | None]]:
     return pats
 
 
+def two_pass_std(prefix: list[float]) -> float | None:
+    """Sample std (ddof=1) the way the library's vertical kernel computes
+    it: mean first, then the squared deviations.
+
+    The oracle cannot use polars here. polars' own std is neither
+    two-pass nor Welford nor naive — it disagrees with all three once
+    its intermediate accumulation overflows (`[1e308, 1e308]` reads NaN)
+    — and no algorithm reproduces it bit-for-bit anyway, because it
+    accumulates in lanes. The library's contract is therefore that the
+    scan equals the *library's* vertical kernel exactly (asserted here),
+    which in turn tracks polars on ordinary data (asserted by
+    test_std_tracks_polars_on_ordinary_data).
+    """
+    n = len(prefix)
+    if n < 2:
+        return None
+    mean = sum(prefix) / n
+    # d * d, not d ** 2: Python's power operator raises OverflowError
+    # where IEEE multiplication saturates to inf, as the kernel does.
+    variance = sum((v - mean) * (v - mean) for v in prefix) / (n - 1)
+    return math.sqrt(variance) if variance == variance and variance >= 0 else NAN
+
+
 def vertical(agg: str, prefix: list[float]) -> float | int | None:
     """The vertical aggregation over a run prefix's non-null values,
     with polars itself as the kernel (the deference doctrine)."""
@@ -52,6 +93,8 @@ def vertical(agg: str, prefix: list[float]) -> float | int | None:
         return s.sum()
     if agg == "count":
         return len(prefix)  # prefix holds only non-null values
+    if agg == "std":
+        return two_pass_std(prefix)
     if agg == "delta":
         mx, mn = s.max(), s.min()
         return None if mx is None else mx - mn  # ty: ignore[unsupported-operator]
@@ -82,11 +125,16 @@ def scan_oracle(agg, values, gates, outside) -> list:
 def assert_row_matches(got: list, expected: list, ctx: str) -> None:
     assert len(got) == len(expected), ctx
     for j, (g, e) in enumerate(zip(got, expected)):
-        where = f"{ctx}, position {j}: got {g}, expected {e}"
+        where = f"{ctx}, position {j}: got {g!r}, expected {e!r}"
         if e is None:
             assert g is None, where
         elif isinstance(e, float) and math.isnan(e):
             assert g is not None and math.isnan(g), where
+        elif e == 0.0:
+            # Pin the sign of a zero too: min/max keep the first of a
+            # signed-zero tie, and sum folds from +0.0, both of which a
+            # magnitude-only comparison cannot see.
+            assert g == 0.0 and math.copysign(1.0, g) == math.copysign(1.0, e), where
         else:
             assert g == pytest.approx(e), where
 
@@ -129,6 +177,108 @@ def test_all_true_gate_matches_native_cum(agg, native):
         ).alias("r")
     )["r"][0].to_list()
     assert_row_matches(got, expected, f"{agg} vs {native}")
+
+
+def test_std_tracks_polars_on_ordinary_data():
+    # The other half of the std contract: the library's kernel agrees
+    # with polars' vertical std to floating-point rounding whenever
+    # polars' own accumulation stays in range.
+    rng = np.random.default_rng(3)
+    data = list(rng.standard_normal(60) * 1000 + 1e6)
+    got = pl.DataFrame({"v": [data]}, schema={"v": pl.List(pl.Float64)}).select(
+        polist.cum_agg_runs(
+            "v", pl.lit([True] * len(data)), aggregation="std"
+        ).alias("r")
+    )["r"][0].to_list()
+    for k in range(2, len(data) + 1):
+        assert got[k - 1] == pytest.approx(
+            pl.Series(data[:k], dtype=pl.Float64).std(), rel=1e-12
+        ), k
+
+
+def test_std_is_the_same_kernel_as_agg_slices():
+    # One input, one answer: the scan's final position must equal the
+    # library's own vertical aggregation over the whole run, including
+    # in the overflow regime where polars' std parts company with every
+    # textbook algorithm.
+    for values in [[1e308, 1e308], [1e16, 1e16 + 2.0], [1.0, 2.0, 3.0], [1e-8, 2e-8]]:
+        idx = [float(i) for i in range(len(values))]
+        df = pl.DataFrame(
+            {"v": [values], "i": [idx]},
+            schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
+        )
+        scan = df.select(
+            polist.cum_agg_runs(
+                "v", pl.lit([True] * len(values)), aggregation="std"
+            ).alias("r")
+        )["r"][0].to_list()[-1]
+        flat = df.select(
+            polist.agg_slices("v", "i", aggregation="std").alias("r")
+        )["r"][0]
+        assert scan == flat, values
+
+
+def test_std_does_not_collapse_to_zero_for_distinct_values():
+    # An incremental variance whose running mean rounds onto the next
+    # value reports zero spread for data that has spread; at timestamp
+    # magnitudes that is an ordinary input, not an exotic one.
+    values = [1e16, 1e16 + 2.0]
+    got = pl.DataFrame({"v": [values]}, schema={"v": pl.List(pl.Float64)}).select(
+        polist.cum_agg_runs("v", pl.lit([True, True]), aggregation="std").alias("r")
+    )["r"][0].to_list()
+    assert got[1] == pytest.approx(pl.Series(values, dtype=pl.Float64).std())
+    assert got[1] > 0.0
+
+
+def test_median_matches_polars_at_extremes():
+    # A naive (a + b) / 2 midpoint overflows for large equal values and
+    # loses the equality short-circuit that equal infinities need.
+    for values in [
+        [1e308, 1e308], [-1e308, -1e308], [1.0, -INF], [-INF, 3.0],
+        [INF, INF], [-INF, -INF], [-1e308, 1e308], [1.0, INF],
+    ]:
+        got = pl.DataFrame({"v": [values]}, schema={"v": pl.List(pl.Float64)}).select(
+            polist.cum_agg_runs(
+                "v", pl.lit([True] * len(values)), aggregation="median"
+            ).alias("r")
+        )["r"][0].to_list()
+        expected = [
+            pl.Series(values[:k], dtype=pl.Float64).median()
+            for k in range(1, len(values) + 1)
+        ]
+        assert_row_matches(got, expected, f"median {values}")
+
+
+@pytest.mark.parametrize("values", [[-0.0, 0.0], [0.0, -0.0], [-0.0, -0.0]])
+def test_signed_zero_ties_keep_the_first_value(values):
+    # polars' min/max keep the earlier of two values that compare equal;
+    # Rust's f64::min/max keep the later, which flips the sign of zero.
+    df = pl.DataFrame({"v": [values]}, schema={"v": pl.List(pl.Float64)})
+    for agg in ["min", "max", "median"]:
+        got = df.select(
+            polist.cum_agg_runs(
+                "v", pl.lit([True] * len(values)), aggregation=agg  # ty: ignore[invalid-argument-type]
+            ).alias("r")
+        )["r"][0].to_list()
+        expected = [
+            getattr(pl.Series(values[:k], dtype=pl.Float64), agg)()
+            for k in range(1, len(values) + 1)
+        ]
+        assert_row_matches(got, expected, f"{agg} {values}")
+
+
+def test_leading_infinity_also_deviates_from_native_cum_seed_leak():
+    # The native seed leak is not NaN-specific: cum_min/cum_max fold
+    # from -+f64::MAX and never replace the seed on a tie, so a leading
+    # infinity of the same sign leaks it too. The prefix rule gives the
+    # true infinity instead.
+    df = pl.DataFrame({"v": [[INF, 1.0]]}, schema={"v": pl.List(pl.Float64)})
+    got = df.select(
+        polist.cum_agg_runs("v", pl.lit([True, True]), aggregation="min").alias("r")
+    )["r"][0].to_list()
+    native = pl.Series([INF, 1.0], dtype=pl.Float64).cum_min().to_list()
+    assert got[0] == INF
+    assert native[0] == pytest.approx(1.7976931348623157e308)
 
 
 def test_leading_nan_follows_prefix_rule_not_polars_seed_leak():
@@ -283,6 +433,66 @@ def test_gate_literal_broadcasts():
         polist.cum_agg_runs("v", pl.lit([True, True]), aggregation="sum").alias("r")
     )
     assert out["r"].to_list() == [[1.0, 3.0], [3.0, 7.0]]
+
+
+def test_value_literal_broadcasts():
+    # The other side of the broadcasting axis: one constant signal
+    # scanned against per-row gates.
+    df = pl.DataFrame(
+        {"g": [[True, True], [True, False]]}, schema={"g": pl.List(pl.Boolean)}
+    )
+    out = df.select(
+        polist.cum_agg_runs(pl.lit([1.0, 2.0]), "g", aggregation="sum").alias("r")
+    )
+    assert out["r"].to_list() == [[1.0, 3.0], [1.0, None]]
+
+
+def test_run_state_resets_after_a_nan_poisoned_run():
+    # A NaN poisons sum/mean/std for the rest of its run; a gate break
+    # must start the next run clean rather than carrying it over.
+    df = pl.DataFrame(
+        {"v": [[1.0, NAN, 2.0, 5.0, 7.0]]}, schema={"v": pl.List(pl.Float64)}
+    ).with_columns(pl.lit([True, True, True, False, True]).alias("g"))
+    sums = df.select(
+        polist.cum_agg_runs("v", "g", aggregation="sum").alias("r")
+    )["r"][0].to_list()
+    assert sums[0] == 1.0
+    assert math.isnan(sums[1]) and math.isnan(sums[2])  # poisoned
+    assert sums[3] is None  # outside
+    assert sums[4] == 7.0  # fresh run, uncontaminated
+
+    means = df.select(
+        polist.cum_agg_runs("v", "g", aggregation="mean").alias("r")
+    )["r"][0].to_list()
+    assert math.isnan(means[2]) and means[4] == 7.0
+
+
+def test_array_input_raises_cleanly():
+    # PR 0 exists because an Array input used to abort the process; the
+    # new plugins must also produce a catchable typed error.
+    df = pl.DataFrame(
+        {"v": [[1.0, 2.0]], "g": [[True, True]]},
+        schema={"v": pl.Array(pl.Float64, 2), "g": pl.List(pl.Boolean)},
+    )
+    with pytest.raises(polars.exceptions.PolarsError, match="List column"):
+        df.select(polist.cum_agg_runs("v", "g", aggregation="sum"))
+
+
+def test_float32_accumulates_in_f64_and_rounds_once():
+    # Doctrine 4: the kernel computes in f64 and rounds at the exit
+    # boundary, while polars' Float32 cum_sum rounds every step. The
+    # deviation is deliberate, so pin it rather than let it drift.
+    # 3e38 + 3e38 overflows Float32 (max ~3.4e38) but not Float64.
+    values = [3e38, 3e38, -3e38]
+    df = pl.DataFrame({"v": [values]}, schema={"v": pl.List(pl.Float32)})
+    got = df.select(
+        polist.cum_agg_runs("v", pl.lit([True] * 3), aggregation="sum").alias("r")
+    )["r"][0].to_list()
+    native = pl.Series(values, dtype=pl.Float32).cum_sum().to_list()
+    # polars overflows at the second step and never recovers; the f64
+    # accumulator stays in range and rounds back to a finite Float32.
+    assert math.isinf(native[1]) and math.isinf(native[2])
+    assert math.isinf(got[1]) and got[2] == pytest.approx(3e38, rel=1e-6)
 
 
 @pytest.mark.parametrize("engine", ["in-memory", "streaming"])

@@ -104,7 +104,6 @@ fn kleene(
 /// Zip one row's element pairs through `f`; a null row on either side
 /// stays null, mismatched lengths raise, empty lists zip to empty.
 fn zip_row<T: Copy, V>(
-    row_idx: usize,
     left: Option<&[Option<T>]>,
     right: Option<&[Option<T>]>,
     f: impl Fn(Option<T>, Option<T>) -> Option<V>,
@@ -112,10 +111,13 @@ fn zip_row<T: Copy, V>(
     let (Some(left), Some(right)) = (left, right) else {
         return Ok(None);
     };
+    // No row index: plugins are handed one chunk at a time, so any
+    // position we could name here is chunk-local and would point at a
+    // different, innocent row of the frame.
     polars_ensure!(
         left.len() == right.len(),
         ComputeError:
-        "zip_binary: left and right lists differ in length at row {row_idx} ({} vs {})",
+        "zip_binary: a row's left and right lists differ in length ({} vs {})",
         left.len(), right.len()
     );
     Ok(Some(
@@ -217,7 +219,7 @@ fn zip_binary(
             TypedListInput::<bool>::boolean(&inputs[1], "zip_binary: right_column")?;
         let len = broadcast_len(&[left.n_rows(), right.n_rows()])?;
         let rows = (0..len)
-            .map(|i| zip_row(i, left.row(i), right.row(i), |a, b| kleene(op, a, b)))
+            .map(|i| zip_row(left.row(i), right.row(i), |a, b| kleene(op, a, b)))
             .collect::<PolarsResult<Vec<_>>>()?;
         return Ok(build_bool_list(rows));
     }
@@ -228,7 +230,7 @@ fn zip_binary(
 
     if op.is_arithmetic() {
         let rows = (0..len)
-            .map(|i| zip_row(i, left.row(i), right.row(i), |a, b| arithmetic(op, a, b)))
+            .map(|i| zip_row(left.row(i), right.row(i), |a, b| arithmetic(op, a, b)))
             .collect::<PolarsResult<Vec<_>>>()?;
         build_float_list(
             rows,
@@ -236,7 +238,7 @@ fn zip_binary(
         )
     } else {
         let rows = (0..len)
-            .map(|i| zip_row(i, left.row(i), right.row(i), |a, b| comparison(op, a, b)))
+            .map(|i| zip_row(left.row(i), right.row(i), |a, b| comparison(op, a, b)))
             .collect::<PolarsResult<Vec<_>>>()?;
         Ok(build_bool_list(rows))
     }

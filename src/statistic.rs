@@ -34,6 +34,50 @@ impl Aggregation {
     }
 }
 
+/// Running minimum that skips NaN and keeps the **first** of values
+/// that compare equal, as polars does. `f64::min` would return the
+/// later one, which flips the sign of a `-0.0`/`+0.0` tie.
+pub(crate) fn min_fold(
+    acc: f64,
+    x: f64,
+) -> f64 {
+    if acc.is_nan() {
+        x
+    } else if x.is_nan() || acc <= x {
+        acc
+    } else {
+        x
+    }
+}
+
+/// Running maximum, first-wins on ties. See [`min_fold`].
+pub(crate) fn max_fold(
+    acc: f64,
+    x: f64,
+) -> f64 {
+    if acc.is_nan() {
+        x
+    } else if x.is_nan() || acc >= x {
+        acc
+    } else {
+        x
+    }
+}
+
+/// The median of two middle order statistics, as polars computes it.
+///
+/// Linear interpolation rather than `(a + b) / 2`, which overflows for
+/// large equal values, plus an equality short-circuit, without which
+/// equal infinities would read NaN. Together these reproduce polars on
+/// every probed input, including `-0.0`/`+0.0` ties (the short-circuit
+/// returns the first, so a stable sort carries the sign through).
+pub(crate) fn midpoint(
+    a: f64,
+    b: f64,
+) -> f64 {
+    if a == b { a } else { a + (b - a) * 0.5 }
+}
+
 /// Statistics over slices of data.
 pub(crate) trait Statistic {
     fn values(&self) -> &[f64];
@@ -42,15 +86,11 @@ pub(crate) trait Statistic {
         self.values().is_empty()
     }
 
-    /// Sum with polars' identity element: an empty selection sums to
-    /// `+0.0` (polars itself is split between `+0.0` and `-0.0` here,
-    /// and Rust's `Iterator::sum` starts from IEEE's additive identity
-    /// `-0.0`; the library standardizes on `+0.0`).
+    /// Sum from the `+0.0` identity, so an empty selection and an
+    /// all-`-0.0` one both read `+0.0`, as polars does. (Rust's
+    /// `Iterator::sum` folds from IEEE's `-0.0` identity instead.)
     fn sum(&self) -> Option<f64> {
-        if self.is_empty() {
-            return Some(0.0);
-        }
-        Some(self.values().iter().sum())
+        Some(self.values().iter().fold(0.0, |acc, &v| acc + v))
     }
 
     fn median(&self) -> Option<f64> {
@@ -58,10 +98,13 @@ pub(crate) trait Statistic {
             return None;
         }
         let mut values = self.values().to_vec();
+        // sort_by is stable, so ties keep their input order and the
+        // midpoint short-circuit returns the earlier of a signed-zero
+        // pair -- matching polars.
         values.sort_by(|a, b| crate::util::tot_cmp(*a, *b));
         let mid = values.len() / 2;
         if values.len().is_multiple_of(2) {
-            Some((values[mid - 1] + values[mid]) / 2.0)
+            Some(midpoint(values[mid - 1], values[mid]))
         } else {
             Some(values[mid])
         }
@@ -91,21 +134,21 @@ pub(crate) trait Statistic {
         Some(variance.sqrt())
     }
 
-    // The NaN seed makes IEEE min/max skip NaN values unless every
-    // value is NaN, matching polars.
+    // The NaN seed makes the folds skip NaN values unless every value
+    // is NaN, matching polars.
 
     fn min(&self) -> Option<f64> {
         if self.is_empty() {
             return None;
         }
-        Some(self.values().iter().cloned().fold(f64::NAN, f64::min))
+        Some(self.values().iter().cloned().fold(f64::NAN, min_fold))
     }
 
     fn max(&self) -> Option<f64> {
         if self.is_empty() {
             return None;
         }
-        Some(self.values().iter().cloned().fold(f64::NAN, f64::max))
+        Some(self.values().iter().cloned().fold(f64::NAN, max_fold))
     }
 
     fn delta(&self) -> Option<f64> {

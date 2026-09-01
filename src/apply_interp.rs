@@ -15,33 +15,31 @@ struct InterpKwargs {
 /// first/last `y` value.
 ///
 /// `x` must be non-decreasing for the result to be meaningful; with
-/// `strict` the first violation raises (a NaN in `x` counts as one),
-/// without it unsorted `x` silently interpolates garbage, as in numpy.
+/// `strict` the first descending pair raises, without it unsorted `x`
+/// silently interpolates garbage, as in numpy. NaN in `x` is a
+/// legitimate float that propagates into the output either way: the
+/// check exists for the silent failure, not the visible one.
 #[polars_expr(output_type_func=list_f64_output)]
 fn apply_interp(
     inputs: &[Series],
     kwargs: InterpKwargs,
 ) -> PolarsResult<Series> {
-    apply_list_transform(inputs, |row_idx, cols| {
+    apply_list_transform(inputs, |cols| {
         polars_ensure!(
             cols[0].len() == cols[1].len(),
             ComputeError: "apply_interp: x and y lists differ in length ({} vs {})",
             cols[0].len(), cols[1].len()
         );
-        // Non-decreasing means each pair compares Less or Equal; a NaN
-        // pair is incomparable and counts as a violation.
-        let in_order = |w: &&[f64]| {
-            matches!(
-                w[0].partial_cmp(&w[1]),
-                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-            )
-        };
+        // Only a strictly descending pair is a violation; a NaN pair is
+        // incomparable, and NaN propagates per the transform family's
+        // rule. No row index: the plugin is handed one chunk at a time,
+        // so any position named here would be chunk-local.
         if kwargs.strict
-            && let Some(w) = cols[0].windows(2).find(|w| !in_order(w))
+            && let Some(w) = cols[0].windows(2).find(|w| w[0] > w[1])
         {
             polars_bail!(ComputeError:
                 "apply_interp: x_column must be non-decreasing with strict=true, \
-                found {} followed by {} at row {row_idx}",
+                found {} followed by {}",
                 w[0], w[1]
             );
         }

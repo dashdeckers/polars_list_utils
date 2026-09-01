@@ -64,9 +64,14 @@ boost.
       `True`-gated elements accumulate, and every other position emits null (or a plain zero
       with `outside="zero"`).
     - Each emitted element equals the vertical aggregation over the run's elements so far,
-      so an all-`True` gate reproduces `cum_sum`/`cum_min`/`cum_max`/`cum_count`; null values
-      emit null but keep the running state, except `count`, which emits the running count as
-      `cum_count` does.
+      so an all-`True` gate over `Float64` tracks `cum_sum`/`cum_min`/`cum_max`/`cum_count`;
+      null values emit null but keep the running state, except `count`, which emits the
+      running count as `cum_count` does.
+    - Two documented departures from the native cumulatives: `cum_min`/`cum_max` fold from
+      ∓`f64::MAX` and never replace that seed on a tie, so they report ±1.8e308 where the
+      prefix is all-NaN or opens with an infinity of the same sign, while this function
+      reports the true prefix extreme; and `Float32` values accumulate in `f64` and round
+      once at the boundary, where Polars rounds every step.
     - `Float32` values stay `Float32`; `count` emits `UInt32` (Polars' count dtype).
 
 The six plugin functions accept a length-1 literal list column (e.g. `pl.lit([...])`) for
@@ -75,8 +80,9 @@ names, mismatched list lengths) raises an error instead of silently returning nu
 per-row data problems (e.g. a signal length that is not a power of two) yield null rows.
 
 Both aggregation functions support `sum`, `mean`, `median`, `std`, `min`, `max`, `delta`,
-and `count`, and both handle missing data exactly like the vertical aggregations of Polars
-itself:
+and `count`, and both handle missing data like the vertical aggregations of Polars itself.
+(Semantically, that is: floating-point accumulation order differs from Polars', so results
+agree to rounding rather than bit-for-bit.)
 
 - Nulls are skipped: excluded from both the numerator and the denominator, so `count`
   only counts non-null values and an empty or all-null selection yields null (`count`: 0,
@@ -96,7 +102,12 @@ and cumulative Polars operations per element instead, and treat empty lists as v
 Some checks are opt-in via `strict=True` (default off): `apply_interp` verifies that `x`
 is non-decreasing, `agg_slices` rejects inverted or NaN range bounds at expression
 construction, and `agg_lists` raises on lists longer than `list_length` instead of
-silently truncating them.
+silently truncating them. Each check covers a failure that is otherwise silent; NaN, which
+announces itself in the output, propagates rather than raising.
+
+Errors raised from inside a row describe the offending row by its shape rather than its
+position: Polars hands a plugin one chunk at a time, so any row number counted there would
+be chunk-local and would point at a different, valid row of the frame.
 
 ### Example
 

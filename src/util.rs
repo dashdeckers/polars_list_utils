@@ -143,15 +143,15 @@ impl<T> ListInputs<T> {
 /// Apply a fallible transformation elementwise across one or more list
 /// columns, returning a `List[f64]` column.
 ///
-/// The closure receives the row index and one `&[f64]` per input column
-/// (length-1 literals broadcast) and returns `Ok(None)` to emit a null
-/// row, or `Err` to abort the whole query. Null input rows stay null.
+/// The closure receives one `&[f64]` per input column (length-1
+/// literals broadcast) and returns `Ok(None)` to emit a null row, or
+/// `Err` to abort the whole query. Null input rows stay null.
 pub(crate) fn apply_list_transform<F>(
     inputs: &[Series],
     f: F,
 ) -> PolarsResult<Series>
 where
-    F: Fn(usize, &[&[f64]]) -> PolarsResult<Option<Vec<f64>>>,
+    F: Fn(&[&[f64]]) -> PolarsResult<Option<Vec<f64>>>,
 {
     let li = ListInputs::new(inputs)?;
 
@@ -163,7 +163,7 @@ where
     );
 
     for i in 0..li.len() {
-        match li.row(i).map(|slices| f(i, &slices)).transpose()?.flatten() {
+        match li.row(i).map(|slices| f(&slices)).transpose()?.flatten() {
             Some(result) => builder.append_slice(&result),
             None => builder.append_null(),
         }
