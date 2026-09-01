@@ -75,7 +75,7 @@ def test_agg_lists_strict_message_names_no_row():
             polist.agg_lists("v", list_length=2, aggregation="mean", strict=True)
         )
     )
-    assert "list length 3 but list_length=2" in msg
+    assert "list length 3 with non-null values past list_length=2" in msg
     assert "row 1" not in msg
 
 

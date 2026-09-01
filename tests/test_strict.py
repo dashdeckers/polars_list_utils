@@ -69,6 +69,29 @@ def test_interp_strict_ignores_lone_nan_x():
     assert out["r"][0].to_list() == [1.0]
 
 
+def test_interp_strict_sees_a_descent_masked_by_nan():
+    # Every IEEE comparison with NaN is false, so an adjacent-pair test
+    # reads [0, 10, NaN, 1, 2] as sorted and silently interpolates
+    # finite, plausible, wrong numbers -- exactly the failure the check
+    # exists for.
+    df = pl.DataFrame(
+        {"x": [[0.0, 10.0, NAN, 1.0, 2.0]], "y": [[0.0, 1.0, 2.0, 3.0, 4.0]]}
+    )
+    with pytest.raises(polars.exceptions.PolarsError, match="non-decreasing"):
+        df.with_columns(
+            polist.apply_interp("x", "y", pl.lit([0.5]), strict=True).alias("r")
+        )
+
+
+def test_interp_strict_allows_nan_in_genuinely_sorted_x():
+    # NaN itself is not a violation; it propagates into the output.
+    df = pl.DataFrame({"x": [[0.0, NAN, 2.0]], "y": [[0.0, 1.0, 2.0]]})
+    out = df.with_columns(
+        polist.apply_interp("x", "y", pl.lit([0.5]), strict=True).alias("r")
+    )
+    assert math.isnan(out["r"][0].to_list()[0])
+
+
 def test_interp_strict_accepts_duplicate_x():
     # Duplicates stay legal, as in numpy.
     df = pl.DataFrame({"x": [[0.0, 1.0, 1.0, 2.0]], "y": [[0.0, 10.0, 20.0, 30.0]]})
@@ -167,6 +190,21 @@ def test_agg_lists_strict_raises_on_overlong_list():
         df.group_by("g").agg(
             polist.agg_lists("v", list_length=2, aggregation="mean", strict=True)
         )
+
+
+def test_agg_lists_strict_allows_null_padded_rows():
+    # Truncating a null-padded tail discards nothing -- every
+    # aggregation skips nulls anyway -- so raising would be a false
+    # positive whose only remedy is disabling the check outright.
+    # Fixed-capacity buffers and widened ragged data look like this.
+    df = pl.DataFrame(
+        {"g": [1, 1], "v": [[1.0, 2.0, None, None], [3.0, 4.0, None, None]]},
+        schema={"g": pl.Int64, "v": pl.List(pl.Float64)},
+    )
+    out = df.group_by("g").agg(
+        polist.agg_lists("v", list_length=2, aggregation="mean", strict=True).alias("r")
+    )
+    assert out["r"][0].to_list() == pytest.approx([2.0, 3.0])
 
 
 def test_agg_lists_lenient_truncates_silently():

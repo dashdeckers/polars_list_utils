@@ -21,7 +21,9 @@ pub(crate) enum Aggregation {
 ///
 /// Every other aggregation yields null over nothing under either
 /// setting, and `count` yields 0 under either, so this switch reaches
-/// exactly one cell of the matrix.
+/// exactly one cell of the matrix. It applies to a selection that came
+/// out empty; a null row or an empty list never reaches this code,
+/// having already short-circuited to a null output row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Empty {

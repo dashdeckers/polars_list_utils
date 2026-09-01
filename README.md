@@ -107,12 +107,18 @@ misconfigured range, and a real `0.0` disguises that as a measurement which then
 through a threshold. So `agg_slices` and `agg_lists` take an `empty` argument:
 
 - `empty="null"` (default) — summing nothing is unknown, not zero.
-- `empty="zero"` — Polars' convention. Equivalent to `.fill_null(0.0)` on the default, and
-  what you want when the result must agree with `explode().group_by().sum()`.
+- `empty="zero"` — Polars' convention, matching
+  `explode().group_by().agg(col.filter(...).sum())`.
 
 It reaches exactly one cell of the matrix: `sum` is the only aggregation with a non-null
 identity, every other one yields null over nothing either way, and `count` yields 0 either
 way.
+
+The switch governs an empty *selection* — the lists held elements, but none was selected.
+A null row, and a row whose lists are themselves empty, stay null under both settings for
+every aggregation. So `empty="zero"` is not the same as `.fill_null(0.0)`: that cannot tell
+a missing row from an empty selection, and would turn a missing measurement into a real
+zero, which is the error this flag exists to avoid.
 
 The same philosophy sets the `strict` default. `apply_interp` verifies that `x` is
 non-decreasing, `agg_slices` rejects inverted or NaN range bounds at expression

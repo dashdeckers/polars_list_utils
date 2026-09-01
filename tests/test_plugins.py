@@ -280,31 +280,138 @@ def test_agg_slices_all_null_selection_follows_the_empty_flag():
     assert out["zero"][0] == 0.0
 
 
-def test_empty_zero_reproduces_the_explode_equivalence():
+@pytest.mark.parametrize(
+    ("lo", "hi", "selects_anything"), [(0.0, 1.0, True), (100.0, 200.0, False)]
+)
+def test_empty_zero_reproduces_the_explode_round_trip(lo, hi, selects_anything):
     # Any list aggregation can be rewritten as explode + group_by + agg.
-    # That equivalence holds for every aggregation under the default,
-    # and for `sum` only under empty="zero" -- the one documented
-    # departure from polars' vertical convention.
-    data = [1.0, 2.0, 3.0]
+    # This performs that round trip rather than describing it, for both
+    # a range that selects values and one that selects none -- the
+    # latter is the cell where empty="zero" earns its keep.
     df = pl.DataFrame(
-        {"v": [data], "i": [[0.0, 1.0, 2.0]]},
+        {"v": [[1.0, 2.0, 3.0]], "i": [[0.0, 1.0, 2.0]]},
         schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
     )
-    empty_range: list[polist.Range] = [(100.0, 200.0)]
-    exploded = pl.Series([], dtype=pl.Float64)  # the same empty selection
+    rng: list[polist.Range] = [(lo, hi)]
+
+    exploded = (
+        df.with_row_index()
+        .explode(["v", "i"])
+        .group_by("index")
+        .agg(
+            pl.col("v")
+            .filter(pl.col("i").is_between(lo, hi))
+            .sum()
+            .alias("r")
+        )
+    )["r"][0]
 
     got_zero = df.select(
         polist.agg_slices(
-            "v", "i", aggregation="sum", slices_include=empty_range, empty="zero"
+            "v", "i", aggregation="sum", slices_include=rng, empty="zero"
         ).alias("r")
     )["r"][0]
     got_null = df.select(
-        polist.agg_slices(
-            "v", "i", aggregation="sum", slices_include=empty_range
-        ).alias("r")
+        polist.agg_slices("v", "i", aggregation="sum", slices_include=rng).alias("r")
     )["r"][0]
-    assert got_zero == exploded.sum()  # agrees with polars
-    assert got_null is None  # deliberately does not
+
+    assert got_zero == exploded
+    if selects_anything:
+        assert got_null == exploded  # the two settings agree here
+    else:
+        assert got_null is None  # and deliberately part company here
+
+
+@pytest.mark.parametrize("agg", ["mean", "median", "std", "min", "max", "delta", "count"])
+@pytest.mark.parametrize("include", [[(0.0, 2.0)], [(100.0, 200.0)]])
+def test_empty_flag_touches_only_sum(agg, include):
+    # Every aggregation but sum must be byte-identical under both
+    # settings, whether or not the selection came out empty.
+    df = pl.DataFrame(
+        {"v": [[1.0, 2.0, 3.0]], "i": [[0.0, 1.0, 2.0]]},
+        schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
+    )
+    out = df.select(
+        polist.agg_slices(
+            "v", "i", aggregation=agg, slices_include=include
+        ).alias("null"),
+        polist.agg_slices(
+            "v", "i", aggregation=agg, slices_include=include, empty="zero"
+        ).alias("zero"),
+    )
+    assert out["null"][0] == out["zero"][0]
+
+
+@pytest.mark.parametrize("empty", ["null", "zero"])
+def test_empty_does_not_change_a_non_empty_sum(empty):
+    # Guards the `values.is_empty()` half of the kernel's condition:
+    # empty="zero" must not flatten a selection that has values.
+    df = pl.DataFrame(
+        {"v": [[1.0, 2.0, 3.0]], "i": [[0.0, 1.0, 2.0]]},
+        schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
+    )
+    out = df.select(
+        polist.agg_slices(
+            "v", "i", aggregation="sum", slices_include=[(0.0, 2.0)], empty=empty
+        ).alias("r")
+    )
+    assert out["r"][0] == 6.0
+
+
+def test_empty_zero_is_not_fill_null():
+    # A null row and an empty selection both read null by default, but
+    # they are different facts: empty="zero" resolves only the second,
+    # while fill_null(0.0) cannot tell them apart and launders a
+    # missing measurement into a real zero.
+    df = pl.DataFrame(
+        {"v": [[1.0, 2.0], None], "i": [[0.0, 1.0], None]},
+        schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
+    )
+    rng: list[polist.Range] = [(100.0, 200.0)]
+    out = df.select(
+        polist.agg_slices(
+            "v", "i", aggregation="sum", slices_include=rng, empty="zero"
+        ).alias("zero"),
+        polist.agg_slices("v", "i", aggregation="sum", slices_include=rng)
+        .fill_null(0.0)
+        .alias("filled"),
+    )
+    assert out["zero"].to_list() == [0.0, None]
+    assert out["filled"].to_list() == [0.0, 0.0]
+
+
+def test_empty_list_rows_are_null_rows_under_both_settings():
+    # Today an empty list is a null row rather than an empty selection,
+    # so `empty` (and count's 0) cannot reach it. Spec section 7 changes
+    # this in the breaking pass; pin it until then so the divergence
+    # from agg_lists is deliberate rather than discovered.
+    df = pl.DataFrame(
+        {"v": [[]], "i": [[]]},
+        schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
+    )
+    out = df.select(
+        polist.agg_slices("v", "i", aggregation="sum", empty="zero").alias("sum"),
+        polist.agg_slices("v", "i", aggregation="count", empty="zero").alias("count"),
+    )
+    assert out["sum"][0] is None
+    assert out["count"][0] is None
+
+
+@pytest.mark.parametrize("bad", ["nul", "Null", "zeroes", None, 0, ""])
+def test_both_aggregators_reject_a_bogus_empty(bad):
+    # Falling through to "zero" on a typo would silently pick the very
+    # reading the flag exists to avoid.
+    with pytest.raises(ValueError, match="empty must be"):
+        polist.agg_slices("v", "i", aggregation="sum", empty=bad)
+    with pytest.raises(ValueError, match="empty must be"):
+        polist.agg_lists("v", list_length=1, aggregation="sum", empty=bad)
+
+
+def test_both_aggregators_reject_a_bogus_aggregation():
+    with pytest.raises(ValueError, match="aggregation must be"):
+        polist.agg_slices("v", "i", aggregation="total")  # ty: ignore[invalid-argument-type]
+    with pytest.raises(ValueError, match="aggregation must be"):
+        polist.agg_lists("v", list_length=1, aggregation="total")  # ty: ignore[invalid-argument-type]
 
 
 def test_agg_slices_matches_polars_vertical_semantics():

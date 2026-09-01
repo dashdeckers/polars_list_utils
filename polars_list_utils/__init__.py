@@ -44,6 +44,9 @@ Window = Literal["hann", "hanning", "blackman"]
 Scaling = Literal["amplitude", "power", "psd"]
 Aggregation = Literal["sum", "mean", "median", "std", "min", "max", "delta", "count"]
 Empty = Literal["null", "zero"]
+
+_AGGREGATIONS = ("sum", "mean", "median", "std", "min", "max", "delta", "count")
+_EMPTY = ("null", "zero")
 BinaryOp = Literal[
     "add", "sub", "mul", "div", "and", "or", "gt", "ge", "lt", "le", "eq", "ne"
 ]
@@ -190,6 +193,28 @@ def apply_fft(
     )
 
 
+def _check_choice(
+    value: object,
+    allowed: tuple[str, ...],
+    param: str,
+    func: str,
+) -> None:
+    """Reject an out-of-vocabulary keyword at expression construction.
+
+    Both aggregating functions validate here rather than leaving it to
+    the plugin, so a typo fails the same way in each. It matters most
+    for `empty`, whose two settings differ in exactly the direction
+    this library cares about: silently falling through to `"zero"`
+    would turn "no data" into a real 0.0, the failure the flag exists
+    to prevent.
+    """
+    if value not in allowed:
+        raise ValueError(
+            f"{func}: {param} must be one of {', '.join(map(repr, allowed))}, "
+            f"got {value!r}"
+        )
+
+
 def _normalize_ranges(
     ranges: list[Range] | None, param: str, strict: bool
 ) -> list[Range] | None:
@@ -260,17 +285,22 @@ def agg_slices(
     `std` is the sample standard deviation (ddof=1, polars' default)
     and yields null for selections with fewer than two values.
 
-    An empty selection — no element's index fell in range — yields
-    null, except `count`, which yields 0. `empty` decides the one
-    aggregation where the two conventions disagree:
+    An empty selection — the lists held elements, but no index fell in
+    range — yields null, except `count`, which yields 0. `empty`
+    decides the one aggregation where the two conventions disagree:
 
     - `"null"` (default): summing nothing is unknown, not zero. An
       empty selection usually means a misconfigured range, and a real
       `0.0` disguises that as a measurement — the dangerous direction
       for a feature feeding a threshold.
-    - `"zero"`: polars' convention, the identity element of addition.
-      Equivalent to `.fill_null(0.0)` on the default, and the setting
-      to use when this must agree with `explode().group_by().sum()`.
+    - `"zero"`: polars' convention, the identity element of addition,
+      matching `explode().group_by().agg(col.filter(...).sum())`.
+
+    `empty` governs the empty *selection* only. A null row, and a row
+    whose lists are themselves empty, stay null under both settings for
+    every aggregation including `count` — so `empty="zero"` is not the
+    same as `.fill_null(0.0)`, which cannot tell a missing row from an
+    empty selection and would launder the former into a real zero.
 
     Range bounds accept anything `float()` converts, and the explicit
     form may be given as tuples or lists (so ranges loaded from JSON
@@ -280,6 +310,8 @@ def agg_slices(
     bounds raise at expression construction. Pass `strict=False` to
     keep them as legitimately empty selections.
     """
+    _check_choice(aggregation, _AGGREGATIONS, "aggregation", "agg_slices")
+    _check_choice(empty, _EMPTY, "empty", "agg_slices")
     return _plugin(
         "agg_slices",
         [value_column, index_column],
@@ -339,6 +371,8 @@ def agg_lists(
     """
     if list_length < 1:
         raise ValueError(f"list_length must be at least 1, got {list_length}")
+    _check_choice(aggregation, _AGGREGATIONS, "aggregation", "agg_lists")
+    _check_choice(empty, _EMPTY, "empty", "agg_lists")
     col = polars_func_arg_into_col_expr(list_column)
     if strict:
         # Pure polars cannot raise from inside an expression, so the

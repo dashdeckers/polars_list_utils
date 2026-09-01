@@ -30,18 +30,30 @@ fn apply_interp(
             ComputeError: "apply_interp: x and y lists differ in length ({} vs {})",
             cols[0].len(), cols[1].len()
         );
-        // Only a strictly descending pair is a violation; a NaN pair is
-        // incomparable, and NaN propagates per the transform family's
-        // rule. No row index: the plugin is handed one chunk at a time,
-        // so any position named here would be chunk-local.
-        if kwargs.strict
-            && let Some(w) = cols[0].windows(2).find(|w| w[0] > w[1])
-        {
-            polars_bail!(ComputeError:
-                "apply_interp: x_column must be non-decreasing with strict=true, \
-                found {} followed by {}",
-                w[0], w[1]
-            );
+        // Compare each coordinate against the last non-NaN one rather
+        // than its immediate neighbour. NaN stays a legitimate float
+        // that propagates into the output, but it must not hide a
+        // descent: every IEEE comparison with NaN is false, so an
+        // adjacent-pair test reads [0, 10, NaN, 1] as sorted.
+        //
+        // No row index in the message: the plugin is handed one chunk
+        // at a time, so any position named here would be chunk-local.
+        if kwargs.strict {
+            let mut last: Option<f64> = None;
+            for &x in cols[0] {
+                if x.is_nan() {
+                    continue;
+                }
+                if let Some(prev) = last
+                    && x < prev
+                {
+                    polars_bail!(ComputeError:
+                        "apply_interp: x_column must be non-decreasing with \
+                        strict=true, found {prev} followed by {x}"
+                    );
+                }
+                last = Some(x);
+            }
         }
         Ok(Some(interp_slice(
             cols[0],

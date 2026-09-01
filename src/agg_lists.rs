@@ -15,9 +15,15 @@ fn passthrough_output(input_fields: &[Field]) -> PolarsResult<Field> {
     Ok(input_fields[0].clone())
 }
 
-/// Identity pass-through that raises when any row's list is longer
-/// than `list_length` (which `agg_lists` would otherwise silently
-/// truncate to). Null rows are data and pass through.
+/// Identity pass-through that raises when a row would lose data to
+/// `agg_lists`' silent truncation at `list_length`.
+///
+/// Being merely longer than the window is not enough: every
+/// aggregation skips null elements, so truncating a null-padded tail
+/// is provably lossless, and raising on it would be a false positive
+/// whose only remedy is turning the check off entirely. Fixed-capacity
+/// buffers and ragged data widened to a common length are ordinary
+/// inputs here. Null rows are data and pass through.
 ///
 /// The message names no row index: the plugin is handed one chunk at a
 /// time, so any position named here would be chunk-local and point at
@@ -28,13 +34,18 @@ fn check_list_len(
     kwargs: CheckListLenKwargs,
 ) -> PolarsResult<Series> {
     let s = &inputs[0];
+    let width = kwargs.list_length;
     for row in s.list()?.into_iter().flatten() {
-        polars_ensure!(
-            row.len() <= kwargs.list_length,
-            ComputeError:
-            "agg_lists: a row has list length {} but list_length={} (strict=true)",
-            row.len(), kwargs.list_length
-        );
+        if row.len() > width {
+            let tail = row.slice(width as i64, row.len() - width);
+            polars_ensure!(
+                tail.null_count() == tail.len(),
+                ComputeError:
+                "agg_lists: a row has list length {} with non-null values past \
+                list_length={} (strict=true)",
+                row.len(), width
+            );
+        }
     }
     Ok(s.clone())
 }
