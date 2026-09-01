@@ -104,11 +104,16 @@ and cumulative Polars operations per element instead, and treat empty lists as v
 Every function accepts both `List` and `Array` columns. A length-preserving function
 returns the container it was given; `apply_fft` narrows an `Array(w)` to `Array(w // 2 + 1)`,
 and `apply_interp` follows its `xp` argument, since that decides the output's shape.
-`zip_binary` returns an `Array` only when both operands are `Array`s of equal width — a
-mismatch is caught before execution — and a mixed pair gives a `List`. Two exceptions:
-`agg_slices` reduces to a scalar, and `agg_lists` always returns a `List`, being an
-expression composition that never sees its input's schema. Zero-width `Array`s are
-rejected, because Polars panics when slicing them; zero-length `List`s are fine.
+`zip_binary` returns an `Array` only when both operands are `Array`s, since both are
+operands; `cum_agg_runs` follows its value column alone, its gate being a mask rather than
+an operand. Where two inputs must agree element-for-element, their widths are checked
+before execution if both are `Array`s, and per row otherwise. Two exceptions to container
+propagation: `agg_slices` reduces to a scalar, and `agg_lists` always returns a `List`,
+being an expression composition that never sees its input's schema (an `Array` input to it
+must match `list_length` exactly, rather than being null-padded like a short `List`).
+
+Zero-width `Array`s are rejected at any nesting depth, because Polars panics when slicing
+them; zero-length `List`s are fine.
 
 ### Two conventions, one switch
 

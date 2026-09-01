@@ -351,6 +351,33 @@ def test_narrow_integer_inners_do_not_panic(inner):
 
 
 @pytest.mark.parametrize(
+    ("inner", "values"),
+    [
+        (pl.Categorical, [["a", "b"]]),
+        (pl.Enum(["a", "b"]), [["a", "b"]]),
+        (pl.Decimal(10, 2), [[1, 2]]),
+        (pl.Struct({"x": pl.Int64}), [[{"x": 1}]]),
+        (pl.Int128, [[1, 2]]),
+        (pl.String, [["a", "b"]]),
+        (pl.Datetime, [[1, 2]]),
+    ],
+)
+def test_exotic_inner_dtypes_never_panic(inner, values):
+    # Rejecting a dtype is this library's job; being able to *see* it is
+    # polars'. A feature-gated dtype panics during the FFI
+    # reconstruction, before any check of ours can run, so the whole
+    # gated set has to be compiled in. What each dtype then does -- a
+    # clean rejection, or acceptance if it is numeric after all -- is
+    # decided by our own dtype rules; the invariant here is only that
+    # the answer is never a panic.
+    df = pl.DataFrame({"a": values}, schema={"a": pl.List(inner)})
+    try:
+        df.select(polist.agg_slices("a", "a", aggregation="count"))
+    except polars.exceptions.PolarsError as exc:
+        assert "the plugin panicked" not in str(exc), str(exc)
+
+
+@pytest.mark.parametrize(
     "build",
     [
         lambda d: d.select(polist.agg_slices("a", "a", aggregation="count")),
