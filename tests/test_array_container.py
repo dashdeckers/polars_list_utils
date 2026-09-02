@@ -1,0 +1,452 @@
+"""Array support.
+
+The kernels only ever see List: Array is normalized on the way in and
+rebuilt on the way out. So the oracle for every value question is the
+List result, and what needs testing on top is the container algebra --
+which container comes out, and which structural mismatches the schema
+can catch before execution."""
+import polars as pl
+import polars.exceptions
+import pytest
+from polars.datatypes import DataTypeClass
+
+import polars_list_utils as polist
+
+FS = 200.0
+# A power of two for the FFT, and longer than the order-4 Butterworth
+# reflection padding (3 * 4 + 1) so the filter produces a real row.
+SIGNAL = [float(i % 5) for i in range(32)]
+
+
+def as_array(df: pl.DataFrame, **cols: DataTypeClass) -> pl.DataFrame:
+    """The same frame with the named List columns retyped as Arrays,
+    each at the width of its first row."""
+    return df.with_columns(
+        pl.col(name).cast(pl.Array(inner, len(df[name][0])))
+        for name, inner in cols.items()
+    )
+
+
+# ------------------------------------------------- values are container-blind
+
+def test_transforms_agree_between_containers():
+    lists = pl.DataFrame({"s": [SIGNAL]}, schema={"s": pl.List(pl.Float64)})
+    arrays = as_array(lists, s=pl.Float64)
+    for expr in [
+        polist.apply_fft("s", sample_rate=FS, window="hanning", scaling="amplitude"),
+        polist.apply_butterworth("s", sample_rate=FS, max_freq=50.0),
+    ]:
+        got = arrays.select(expr.alias("r"))["r"][0].to_list()
+        expected = lists.select(expr.alias("r"))["r"][0].to_list()
+        assert got == pytest.approx(expected)
+
+
+def test_aggregations_agree_between_containers():
+    lists = pl.DataFrame(
+        {"v": [[1.0, None, 3.0, 4.0]], "i": [[0.0, 1.0, 2.0, 3.0]]},
+        schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
+    )
+    arrays = as_array(lists, v=pl.Float64, i=pl.Float64)
+    for agg in ["sum", "mean", "median", "std", "min", "max", "delta", "count"]:
+        expr = polist.agg_slices("v", "i", aggregation=agg)  # ty: ignore[invalid-argument-type]
+        assert arrays.select(expr.alias("r"))["r"][0] == pytest.approx(
+            lists.select(expr.alias("r"))["r"][0]
+        ), agg
+
+
+def test_elementwise_and_scan_agree_between_containers():
+    lists = pl.DataFrame(
+        {"v": [[1.0, 2.0, 3.0, 4.0]], "g": [[True, True, False, True]]},
+        schema={"v": pl.List(pl.Float64), "g": pl.List(pl.Boolean)},
+    )
+    arrays = as_array(lists, v=pl.Float64, g=pl.Boolean)
+    for expr in [
+        polist.zip_binary("v", "v", op="mul"),
+        polist.cum_agg_runs("v", "g", aggregation="sum"),
+        polist.cum_agg_runs("v", "g", aggregation="count"),
+    ]:
+        assert (
+            arrays.select(expr.alias("r"))["r"][0].to_list()
+            == lists.select(expr.alias("r"))["r"][0].to_list()
+        )
+
+
+# ------------------------------------------------------ container propagation
+
+def test_length_preserving_transforms_keep_the_container():
+    df = as_array(
+        pl.DataFrame({"s": [SIGNAL]}, schema={"s": pl.List(pl.Float64)}), s=pl.Float64
+    )
+    out = df.select(
+        polist.apply_butterworth("s", sample_rate=FS, max_freq=50.0).alias("r")
+    )
+    assert out["r"].dtype == pl.Array(pl.Float64, len(SIGNAL))
+    assert len(out["r"][0].to_list()) == len(SIGNAL)
+
+
+def test_fft_halves_the_array_width():
+    # The one width-transforming function: n samples -> n/2 + 1 bins.
+    df = as_array(
+        pl.DataFrame({"s": [SIGNAL]}, schema={"s": pl.List(pl.Float64)}), s=pl.Float64
+    )
+    half = len(SIGNAL) // 2 + 1
+    out = df.select(polist.apply_fft("s", sample_rate=FS).alias("r"))
+    assert out["r"].dtype == pl.Array(pl.Float64, half)
+    assert len(out["r"][0].to_list()) == half
+
+
+def test_interp_container_follows_xp():
+    # The output holds one value per query coordinate, so xp decides the
+    # shape and the x/y containers are irrelevant.
+    df = pl.DataFrame(
+        {"x": [[0.0, 1.0, 2.0]], "y": [[0.0, 10.0, 20.0]]},
+        schema={"x": pl.List(pl.Float64), "y": pl.List(pl.Float64)},
+    )
+    xp_array = pl.Series("xp", [[0.5, 1.5]], dtype=pl.Array(pl.Float64, 2))
+    out = df.select(polist.apply_interp("x", "y", pl.lit(xp_array)).alias("r"))
+    assert out["r"].dtype == pl.Array(pl.Float64, 2)
+    assert out["r"][0].to_list() == pytest.approx([5.0, 15.0])
+
+    # List xp over Array x/y gives List back.
+    arrays = as_array(df, x=pl.Float64, y=pl.Float64)
+    out = arrays.select(polist.apply_interp("x", "y", pl.lit([0.5])).alias("r"))
+    assert out["r"].dtype == pl.List(pl.Float64)
+
+
+def test_agg_slices_is_scalar_regardless_of_container():
+    df = as_array(
+        pl.DataFrame({"v": [[1.0, 2.0]], "i": [[0.0, 1.0]]},
+                     schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)}),
+        v=pl.Float64, i=pl.Float64,
+    )
+    out = df.select(polist.agg_slices("v", "i", aggregation="mean").alias("r"))
+    assert out["r"].dtype == pl.Float64
+
+
+def test_agg_lists_returns_list_even_for_array_input():
+    # Documented exception to "output container follows input": agg_lists
+    # is an expression composition, not a plugin -- it reduces rows, which
+    # an elementwise plugin cannot -- so it never sees the input schema at
+    # the point where the output container would have to be chosen.
+    df = pl.DataFrame(
+        {"g": [1, 1], "a": [[1.0, 2.0], [3.0, 4.0]]},
+        schema={"g": pl.Int64, "a": pl.Array(pl.Float64, 2)},
+    )
+    out = df.group_by("g").agg(
+        polist.agg_lists("a", list_length=2, aggregation="mean").alias("r")
+    )
+    assert out["r"].dtype == pl.List(pl.Float64)
+    assert out["r"][0].to_list() == pytest.approx([2.0, 3.0])
+
+
+@pytest.mark.parametrize("inner", [pl.Float32, pl.Float64])
+def test_inner_dtype_survives_the_container_round_trip(inner):
+    df = pl.DataFrame(
+        {"v": [[1.0, 2.0]], "g": [[True, True]]},
+        schema={"v": pl.Array(inner, 2), "g": pl.Array(pl.Boolean, 2)},
+    )
+    assert df.select(polist.zip_binary("v", "v", op="add").alias("r"))[
+        "r"
+    ].dtype == pl.Array(inner, 2)
+    assert df.select(
+        polist.cum_agg_runs("v", "g", aggregation="sum").alias("r")
+    )["r"].dtype == pl.Array(inner, 2)
+    # count keeps polars' count dtype, in the input's container.
+    assert df.select(
+        polist.cum_agg_runs("v", "g", aggregation="count").alias("r")
+    )["r"].dtype == pl.Array(pl.UInt32, 2)
+
+
+def test_comparison_on_arrays_yields_boolean_array():
+    df = pl.DataFrame({"a": [[1.0, 2.0]]}, schema={"a": pl.Array(pl.Float64, 2)})
+    out = df.select(polist.zip_binary("a", "a", op="le").alias("r"))
+    assert out["r"].dtype == pl.Array(pl.Boolean, 2)
+
+
+# --------------------------------------------------------- mixed and mismatched
+
+def test_mixed_containers_yield_a_list():
+    df = pl.DataFrame(
+        {"a": [[1.0, 2.0]], "b": [[3.0, 4.0]]},
+        schema={"a": pl.Array(pl.Float64, 2), "b": pl.List(pl.Float64)},
+    )
+    out = df.select(polist.zip_binary("a", "b", op="add").alias("r"))
+    assert out["r"].dtype == pl.List(pl.Float64)
+    assert out["r"][0].to_list() == [4.0, 6.0]
+
+
+def test_array_width_mismatch_raises_at_plan_time():
+    df = pl.LazyFrame(
+        {"a": [[1.0, 2.0]], "b": [[1.0, 2.0, 3.0]]},
+        schema={"a": pl.Array(pl.Float64, 2), "b": pl.Array(pl.Float64, 3)},
+    )
+    with pytest.raises(polars.exceptions.PolarsError, match="equal widths"):
+        df.select(polist.zip_binary("a", "b", op="add")).collect_schema()
+
+
+def test_cum_agg_runs_array_width_mismatch_raises_at_plan_time():
+    df = pl.LazyFrame(
+        {"v": [[1.0, 2.0]], "g": [[True, True, True]]},
+        schema={"v": pl.Array(pl.Float64, 2), "g": pl.Array(pl.Boolean, 3)},
+    )
+    with pytest.raises(polars.exceptions.PolarsError, match="equal widths"):
+        df.select(polist.cum_agg_runs("v", "g", aggregation="sum")).collect_schema()
+
+
+def test_agg_lists_validates_list_length_against_array_width():
+    df = pl.DataFrame(
+        {"g": [1], "a": [[1.0, 2.0]]},
+        schema={"g": pl.Int64, "a": pl.Array(pl.Float64, 2)},
+    )
+    with pytest.raises(polars.exceptions.PolarsError, match="does not match the Array width"):
+        df.group_by("g").agg(polist.agg_lists("a", list_length=3, aggregation="mean"))
+
+
+def test_integer_arrays_raise_for_the_dtype_strict_functions():
+    df = pl.DataFrame({"a": [[1, 2]]}, schema={"a": pl.Array(pl.Int64, 2)})
+    with pytest.raises(polars.exceptions.PolarsError, match="Float32 or Float64"):
+        df.select(polist.zip_binary("a", "a", op="add"))
+
+
+# ------------------------------------------------------------- zero-width edge
+
+ZERO_WIDTH_POSITIONS = {
+    # Every position that accepts a container needs its own case: the
+    # guard lives in each function's plan-time output resolution, so a
+    # position left out of that resolution is a position that panics.
+    "interp_x": lambda z, ok: pl.DataFrame(
+        {"z": z, "a": ok}
+    ).select(polist.apply_interp("z", "a", "a")),
+    "interp_y": lambda z, ok: pl.DataFrame(
+        {"z": z, "a": ok}
+    ).select(polist.apply_interp("a", "z", "a")),
+    "interp_xp": lambda z, ok: pl.DataFrame(
+        {"z": z, "a": ok}
+    ).select(polist.apply_interp("a", "a", "z")),
+    "fft": lambda z, ok: pl.DataFrame({"z": z}).select(
+        polist.apply_fft("z", sample_rate=FS)
+    ),
+    "butterworth": lambda z, ok: pl.DataFrame({"z": z}).select(
+        polist.apply_butterworth("z", sample_rate=FS, max_freq=50.0)
+    ),
+    "agg_slices_value": lambda z, ok: pl.DataFrame({"z": z, "a": ok}).select(
+        polist.agg_slices("z", "a", aggregation="count")
+    ),
+    "agg_slices_index": lambda z, ok: pl.DataFrame({"z": z, "a": ok}).select(
+        polist.agg_slices("a", "z", aggregation="count")
+    ),
+    "zip_left": lambda z, ok: pl.DataFrame({"z": z, "a": ok}).select(
+        polist.zip_binary("z", "a", op="add")
+    ),
+    "zip_right": lambda z, ok: pl.DataFrame({"z": z, "a": ok}).select(
+        polist.zip_binary("a", "z", op="add")
+    ),
+    "cum_value": lambda z, ok: pl.DataFrame(
+        {"z": z, "g": pl.Series("g", [[True, True]], dtype=pl.Array(pl.Boolean, 2))}
+    ).select(polist.cum_agg_runs("z", "g", aggregation="sum")),
+    "cum_gate": lambda z, ok: pl.DataFrame({"a": ok, "z": z}).select(
+        polist.cum_agg_runs("a", "z", aggregation="sum")
+    ),
+    "agg_lists": lambda z, ok: pl.DataFrame({"g": [1], "z": z})
+    .group_by("g")
+    .agg(polist.agg_lists("z", list_length=1, aggregation="mean")),
+}
+
+
+@pytest.mark.parametrize("position", list(ZERO_WIDTH_POSITIONS))
+def test_zero_width_arrays_raise_in_every_position(position):
+    z = pl.Series("z", [[]], dtype=pl.Array(pl.Float64, 0))
+    ok = pl.Series("a", [[1.0, 2.0]], dtype=pl.Array(pl.Float64, 2))
+    with pytest.raises(polars.exceptions.PolarsError) as excinfo:
+        ZERO_WIDTH_POSITIONS[position](z, ok)
+    message = str(excinfo.value)
+    assert "zero-width Arrays are not supported" in message, message
+    assert "the plugin panicked" not in message, message
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pl.Array(pl.Float64, (2, 0)),  # Array(Array(Float64, 0), 2)
+        pl.List(pl.Array(pl.Float64, 0)),
+    ],
+)
+def test_nested_zero_width_arrays_raise(dtype):
+    # The outer width is innocent, so a top-level-only check waves these
+    # through and the inner zero width panics inside polars-arrow.
+    df = pl.DataFrame({"a": pl.Series("a", [[[], []]], dtype=dtype)})
+    with pytest.raises(polars.exceptions.PolarsError) as excinfo:
+        df.select(polist.apply_fft("a", sample_rate=FS))
+    message = str(excinfo.value)
+    assert "zero-width Arrays are not supported" in message, message
+    assert "the plugin panicked" not in message, message
+
+
+@pytest.mark.parametrize(
+    ("build", "match"),
+    [
+        (
+            lambda: polist.apply_interp("x", "y", pl.lit([0.5])),
+            "x and y Arrays must have equal widths",
+        ),
+        (
+            lambda: polist.agg_slices("x", "y", aggregation="mean"),
+            "value and index Arrays must have equal widths",
+        ),
+    ],
+)
+def test_paired_array_widths_are_checked_at_plan_time(build, match):
+    # All four paired equal-length requirements resolve from the schema
+    # when both sides are Arrays, so none of them waits for rows.
+    lf = pl.LazyFrame(
+        {"x": [[1.0, 2.0, 3.0]], "y": [[1.0, 2.0]]},
+        schema={"x": pl.Array(pl.Float64, 3), "y": pl.Array(pl.Float64, 2)},
+    )
+    with pytest.raises(polars.exceptions.PolarsError, match=match):
+        lf.select(build()).collect_schema()
+
+
+def test_mixed_container_length_mismatch_is_a_runtime_error():
+    # A List against an Array cannot be settled from the schema, so the
+    # per-row check has to catch it.
+    df = pl.DataFrame(
+        {"a": [[1.0, 2.0]], "b": [[1.0, 2.0, 3.0]]},
+        schema={"a": pl.Array(pl.Float64, 2), "b": pl.List(pl.Float64)},
+    )
+    with pytest.raises(polars.exceptions.PolarsError, match="differ in length"):
+        df.select(polist.zip_binary("a", "b", op="add"))
+
+
+def test_cum_agg_runs_follows_the_value_column_not_both():
+    # Deliberately unlike zip_binary: the gate is a mask, not an operand,
+    # so a List gate does not demote an Array value column.
+    array_value = pl.DataFrame(
+        {"v": [[1.0, 2.0]], "g": [[True, True]]},
+        schema={"v": pl.Array(pl.Float64, 2), "g": pl.List(pl.Boolean)},
+    )
+    assert array_value.select(
+        polist.cum_agg_runs("v", "g", aggregation="sum").alias("r")
+    )["r"].dtype == pl.Array(pl.Float64, 2)
+
+    list_value = pl.DataFrame(
+        {"v": [[1.0, 2.0]], "g": [[True, True]]},
+        schema={"v": pl.List(pl.Float64), "g": pl.Array(pl.Boolean, 2)},
+    )
+    assert list_value.select(
+        polist.cum_agg_runs("v", "g", aggregation="sum").alias("r")
+    )["r"].dtype == pl.List(pl.Float64)
+
+
+@pytest.mark.parametrize(
+    "inner", [pl.Int8, pl.Int16, pl.UInt8, pl.UInt16, pl.Int32, pl.Int64]
+)
+def test_integer_inners_are_rejected_not_panicked(inner):
+    # Two layers guard this. polars gates the narrow integer dtypes
+    # behind cargo features and reconstructs the Series across the FFI
+    # boundary before any of this library's code runs -- a missing
+    # feature panics there, exactly as the Array dtype once did, which
+    # is why the crate compiles with dtype-full. Once visible, integers
+    # are then rejected by our own dtype rules: a clean typed error at
+    # plan time, never a panic.
+    df = pl.DataFrame({"a": [[1, 2, 3, 4]]}, schema={"a": pl.List(inner)})
+    with pytest.raises(polars.exceptions.PolarsError) as excinfo:
+        df.select(polist.agg_slices("a", "a", aggregation="sum").alias("r"))
+    message = str(excinfo.value)
+    assert "Float32 or Float64" in message
+    assert "the plugin panicked" not in message
+
+
+@pytest.mark.parametrize(
+    ("inner", "values"),
+    [
+        (pl.Categorical, [["a", "b"]]),
+        (pl.Enum(["a", "b"]), [["a", "b"]]),
+        (pl.Decimal(10, 2), [[1, 2]]),
+        (pl.Struct({"x": pl.Int64}), [[{"x": 1}]]),
+        (pl.Int128, [[1, 2]]),
+        (pl.String, [["a", "b"]]),
+        (pl.Datetime, [[1, 2]]),
+    ],
+)
+def test_exotic_inner_dtypes_never_panic(inner, values):
+    # Rejecting a dtype is this library's job; being able to *see* it is
+    # polars'. A feature-gated dtype panics during the FFI
+    # reconstruction, before any check of ours can run, so the whole
+    # gated set has to be compiled in. What each dtype then does -- a
+    # clean rejection, or acceptance if it is numeric after all -- is
+    # decided by our own dtype rules; the invariant here is only that
+    # the answer is never a panic.
+    df = pl.DataFrame({"a": values}, schema={"a": pl.List(inner)})
+    try:
+        df.select(polist.agg_slices("a", "a", aggregation="count"))
+    except polars.exceptions.PolarsError as exc:
+        assert "the plugin panicked" not in str(exc), str(exc)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda d: d.select(polist.agg_slices("a", "a", aggregation="count")),
+        lambda d: d.select(polist.zip_binary("a", "a", op="add")),
+        lambda d: d.select(polist.apply_fft("a", sample_rate=FS)),
+    ],
+)
+def test_zero_width_arrays_raise_instead_of_panicking(build):
+    # polars-arrow panics when slicing a zero-width FixedSizeList, inside
+    # the FFI boundary before any of this library's code runs. Every
+    # function resolves its output type at plan time, so the query is
+    # stopped there -- a typed error, never a panic. A zero-length List
+    # stays perfectly valid.
+    df = pl.DataFrame({"a": [[]]}, schema={"a": pl.Array(pl.Float64, 0)})
+    with pytest.raises(polars.exceptions.PolarsError) as excinfo:
+        build(df)
+    message = str(excinfo.value)
+    assert "zero-width Arrays are not supported" in message
+    # "the plugin panicked" is how pyo3-polars reports an unwound panic.
+    assert "the plugin panicked" not in message
+
+
+def test_zero_length_lists_are_unaffected():
+    df = pl.DataFrame({"a": [[]]}, schema={"a": pl.List(pl.Float64)})
+    out = df.select(polist.zip_binary("a", "a", op="add").alias("r"))
+    assert out["r"][0].to_list() == []
+
+
+# ------------------------------------------------------- nulls and broadcasting
+
+def test_null_rows_and_inner_nulls_behave_as_for_lists():
+    df = pl.DataFrame(
+        {"a": [[1.0, 2.0], None]}, schema={"a": pl.Array(pl.Float64, 2)}
+    )
+    out = df.select(polist.zip_binary("a", "a", op="add").alias("r"))
+    assert out["r"].to_list() == [[2.0, 4.0], None]
+
+    inner_null = pl.DataFrame(
+        {"a": [[1.0, None]], "i": [[0.0, 1.0]]},
+        schema={"a": pl.Array(pl.Float64, 2), "i": pl.Array(pl.Float64, 2)},
+    )
+    assert inner_null.select(
+        polist.agg_slices("a", "i", aggregation="count").alias("r")
+    )["r"][0] == 1.0
+
+
+def test_array_literal_broadcasts():
+    df = pl.DataFrame(
+        {"a": [[1.0, 2.0], [3.0, 4.0]]}, schema={"a": pl.Array(pl.Float64, 2)}
+    )
+    template = pl.Series("t", [[10.0, 20.0]], dtype=pl.Array(pl.Float64, 2))
+    out = df.select(polist.zip_binary("a", pl.lit(template), op="add").alias("r"))
+    assert out["r"].dtype == pl.Array(pl.Float64, 2)
+    assert out["r"].to_list() == [[11.0, 22.0], [13.0, 24.0]]
+
+
+@pytest.mark.parametrize("engine", ["in-memory", "streaming"])
+def test_arrays_survive_lazy_and_streaming(engine):
+    df = pl.DataFrame(
+        {"a": [[float(i), float(i) + 1.0] for i in range(2000)]},
+        schema={"a": pl.Array(pl.Float64, 2)},
+    )
+    expr = polist.zip_binary("a", "a", op="add").alias("r")
+    eager = df.select(expr)["r"].to_list()
+    lazy = df.lazy().select(expr).collect(engine=engine)["r"].to_list()  # ty: ignore[not-subscriptable]
+    assert lazy == eager

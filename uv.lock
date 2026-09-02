@@ -482,6 +482,7 @@ dev = [
     { name = "matplotlib" },
     { name = "maturin" },
     { name = "numpy" },
+    { name = "polars" },
     { name = "pytest" },
 ]
 
@@ -491,6 +492,7 @@ requires-dist = [
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.0,<2.0" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=2.2.3" },
     { name = "polars", specifier = ">=1.23.0" },
+    { name = "polars", marker = "extra == 'dev'", specifier = ">=1.25" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
 ]
 provides-extras = ["dev"]

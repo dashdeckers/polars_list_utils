@@ -1,7 +1,8 @@
 [package]
 name = "polars-list-utils"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2024"
+license = "MIT"
 
 [lib]
 name = "polars_list_utils"
@@ -10,7 +11,14 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.26", features = ["extension-module", "abi3-py310"] }
 pyo3-polars = { version = "0.25", features = ["derive"] }
-polars = { version = "0.52", default-features = false }
+# Every dtype a caller can put in a column must be compiled in, hence
+# dtype-full rather than a hand-picked list. polars reconstructs the
+# Series across the plugin's arrow-FFI boundary before any of our code
+# runs, so a dtype whose feature is missing panics there instead of
+# reaching our error path -- the same root cause as the Array
+# process-abort, and unreachable by any check we could add. Rejecting a
+# dtype is our job; being able to see it is polars'.
+polars = { version = "0.52", default-features = false, features = ["dtype-full"] }
 serde = { version = "1", features = ["derive"] }
 realfft = "3.4.0"
 butterworth = "0.1.0"
