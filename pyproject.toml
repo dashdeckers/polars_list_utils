@@ -25,6 +25,10 @@ dev = [
     "pytest >= 8.0",
     "numpy >= 2.2.3",
     "matplotlib >= 3.4.0",
+    # The library itself runs on the declared floor (polars >= 1.23),
+    # but the test suite drives collect(engine="streaming"), which
+    # polars added in 1.25.
+    "polars >= 1.25",
 ]
 
 [build-system]

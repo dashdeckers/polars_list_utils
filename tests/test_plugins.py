@@ -125,6 +125,60 @@ def test_fft_nan_row_yields_all_nan_spectrum():
     assert all(math.isnan(v) for v in spectrum)
 
 
+def test_fft_inf_row_yields_nonfinite_spectrum():
+    # An infinity is invalid data too, but unlike NaN it does not poison
+    # every bin: inf*0 window products and inf-inf bin sums are NaN
+    # while the rest stay infinite -- a visibly invalid mix, never null.
+    signal = sine(25.0)
+    signal[100] = float("inf")
+    df = pl.DataFrame({"s": [signal]}).with_columns(
+        polist.apply_fft("s", sample_rate=FS, scaling="amplitude").alias("a")
+    )
+    spectrum = df["a"][0].to_list()
+    assert spectrum is not None
+    assert all(not math.isfinite(v) for v in spectrum)
+    assert any(math.isinf(v) for v in spectrum)
+
+
+def test_butterworth_nan_contaminates_not_nulls():
+    # Same rule for the filter: invalid propagates, it does not vanish.
+    signal = sine(5.0)
+    signal[50] = float("nan")
+    df = pl.DataFrame({"s": [signal]}).with_columns(
+        polist.apply_butterworth("s", sample_rate=FS, max_freq=20.0).alias("f")
+    )
+    out = df["f"][0].to_list()
+    assert out is not None
+    assert any(math.isnan(v) for v in out)
+
+
+def test_agg_slices_even_count_median_matches_polars():
+    # The interpolated even-count median is a headline 2.0 change; pin
+    # its VALUES against polars, including the extremes where the old
+    # (lo + hi) / 2 midpoint overflowed or mis-signed.
+    for values in (
+        [1.0, 2.0, 3.0, 4.0],
+        [0.1, 0.2, 0.3, 0.4],
+        [1e308, 1e308],
+        [-1e308, 1e308],
+        [1.0, float("-inf")],
+        [float("inf"), float("inf")],
+    ):
+        idx = [float(i) for i in range(len(values))]
+        df = pl.DataFrame(
+            {"v": [values], "i": [idx]},
+            schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
+        )
+        got = df.select(
+            polist.agg_slices("v", "i", aggregation="median").alias("r")
+        )["r"][0]
+        expected = pl.Series(values, dtype=pl.Float64).median()
+        if isinstance(expected, float) and math.isnan(expected):
+            assert got is not None and math.isnan(got), values
+        else:
+            assert got == expected, values
+
+
 def test_transform_empty_list_raises():
     # The limiting case of too-short: a raise policy that softened as
     # the input got worse would be indefensible.
@@ -377,6 +431,7 @@ def test_agg_slices_all_null_selection_follows_the_empty_flag():
     assert out["zero"][0] == 0.0
 
 
+@pytest.mark.filterwarnings("ignore:In Polars 2.0")  # explode(empty_as_null)
 @pytest.mark.parametrize(
     ("lo", "hi", "selects_anything"), [(0.0, 1.0, True), (100.0, 200.0, False)]
 )
@@ -711,6 +766,41 @@ def test_agg_lists_and_agg_slices_share_missing_data_semantics():
 
 
 # ----------------------------------------------------------- null semantics
+
+NULL_ELEMENT_TRANSFORMS = {
+    # Every null-element position across the transform family: a single
+    # entry-path change (dropping nulls, unwrap_or) must fail loudly.
+    "fft": lambda good, bad: pl.DataFrame({"s": [good, bad]}).select(
+        polist.apply_fft("s", sample_rate=FS).alias("r")
+    ),
+    "butterworth": lambda good, bad: pl.DataFrame({"s": [good, bad]}).select(
+        polist.apply_butterworth("s", sample_rate=FS, max_freq=20.0).alias("r")
+    ),
+    # The no-cutoff pass-through is not a no-op: the family entry
+    # contract still applies (spec 9.20).
+    "butterworth_passthrough": lambda good, bad: pl.DataFrame(
+        {"s": [good, bad]}
+    ).select(polist.apply_butterworth("s", sample_rate=FS).alias("r")),
+    "interp_x": lambda good, bad: pl.DataFrame(
+        {"x": [good, bad], "y": [good, good]}
+    ).select(polist.apply_interp("x", "y", pl.lit([0.5]), strict=False).alias("r")),
+    "interp_y": lambda good, bad: pl.DataFrame(
+        {"x": [good, good], "y": [good, bad]}
+    ).select(polist.apply_interp("x", "y", pl.lit([0.5])).alias("r")),
+    "interp_xp": lambda good, bad: pl.DataFrame(
+        {"x": [good, good], "y": [good, good], "p": [good, bad]}
+    ).select(polist.apply_interp("x", "y", "p").alias("r")),
+}
+
+
+@pytest.mark.parametrize("position", list(NULL_ELEMENT_TRANSFORMS))
+def test_null_elements_null_the_row_across_the_family(position):
+    good = [float(v) for v in range(16)]
+    bad = [0.0, None] + [float(v) for v in range(14)]
+    out = NULL_ELEMENT_TRANSFORMS[position](good, bad)["r"]
+    assert out[0] is not None, position
+    assert out[1] is None, position  # inner nulls must not silently misalign
+
 
 def test_null_and_inner_null_rows_yield_null():
     df = pl.DataFrame(

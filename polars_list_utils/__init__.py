@@ -33,7 +33,10 @@ expression composition that never sees its input's schema. Zero-width
 zero-length `List`s are fine.
 
 The plugins accept length-1 literal list columns (e.g. `pl.lit(...)`)
-for any input and broadcast them. Null rows produce null output rows.
+for any input and broadcast them, provided at least one other input is
+a real column — as in polars generally, an expression built only from
+length-1 literals produces a single row rather than broadcasting. Null
+rows produce null output rows.
 
 Data conditions follow three deliberate family regimes. A signal is
 atomic, so for the transforms (`apply_interp`, `apply_butterworth`,
@@ -288,6 +291,14 @@ def _normalize_ranges(
         # Explicit ((value, mode)) form, as a tuple or (from JSON) a list.
         if isinstance(b, (tuple, list)):
             value, mode = b
+            # Validated here so a typo'd mode fails with the parameter's
+            # name, instead of surfacing serde's untagged-enum internals
+            # from the plugin boundary.
+            if mode not in ("closed", "open"):
+                raise ValueError(
+                    f"agg_slices: boundary mode in {param} must be 'closed' "
+                    f"or 'open', got {mode!r}"
+                )
             return (float(value), str(mode))
         return float(b)
 
@@ -508,17 +519,17 @@ def cum_agg_runs(
     vertical `aggregation` over the run's elements so far — so with an
     all-`True` gate over `Float64` values, `sum`/`min`/`max`/`count`
     track polars' `cum_sum`/`cum_min`/`cum_max`/`cum_count`, with two
-    documented exceptions:
+    caveats:
 
-    - `cum_min`/`cum_max` fold from ∓`f64::MAX` and never replace that
-      seed on a tie, so they emit ±1.7976931348623157e+308 wherever the
-      prefix is all-NaN or opens with an infinity of the same sign.
-      This function follows the prefix rule and emits the true prefix
-      minimum or maximum (NaN, or that infinity).
+    - This function has always followed the prefix rule and emitted the
+      true prefix extreme — NaN for an all-NaN prefix, or a leading
+      infinity. polars up to 1.43 instead leaked its fold seed at those
+      positions (`+f64::MAX` from `cum_min`, `-f64::MAX` from
+      `cum_max`; briefly `±inf`); polars 1.44 fixed it and agrees.
     - `Float32` values accumulate in `f64` and round once at the output
-      boundary, while polars rounds every step, so the two can differ
-      in the last bits and around the `Float32` range limit (where this
-      function can stay finite as polars overflows to infinity).
+      boundary, so a polars version that accumulates `cum_*` step-wise
+      in `Float32` can differ in the last bits and around the `Float32`
+      range limit.
 
     Floating-point accumulation order differs from polars generally, so
     treat the correspondence as one of semantics — missing data, NaN,

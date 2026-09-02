@@ -70,6 +70,41 @@ def test_same_list_object_for_both_kwargs(df_ramp):
     assert out["r"][0] == 0.0
 
 
+def test_identical_bound_tuples_in_exclude_alone(df_ramp):
+    # The rebuild must run on slices_exclude independently: a shared
+    # object in BOTH kwargs stops aliasing once include is rebuilt, so
+    # only an exclude-only case can catch a missing exclude rebuild.
+    out = df_ramp.with_columns(
+        polist.agg_slices(
+            "v", "i",
+            aggregation="count",
+            slices_exclude=[((1.0, "closed"), (1.0, "closed"))],
+        ).alias("r")
+    )
+    assert out["r"][0] == 10.0
+
+
+def test_numpy_bounds_in_exclude_alone(df_ramp):
+    out = df_ramp.with_columns(
+        polist.agg_slices(
+            "v", "i",
+            aggregation="count",
+            slices_exclude=[(np.float64(2.0), np.float64(4.0))],
+        ).alias("r")
+    )
+    assert out["r"][0] == 8.0
+
+
+def test_bogus_boundary_mode_fails_with_the_parameter_name(df_ramp):
+    # A typo mode must not surface serde untagged-enum internals.
+    with pytest.raises(ValueError, match="boundary mode in slices_include"):
+        polist.agg_slices(
+            "v", "i",
+            aggregation="count",
+            slices_include=[((0.0, "clsoed"), (1.0, "open"))],  # ty: ignore[invalid-argument-type]
+        )
+
+
 def test_duplicate_simple_ranges(df_ramp):
     out = df_ramp.with_columns(
         polist.agg_slices(

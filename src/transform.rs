@@ -111,9 +111,10 @@ fn fft_magnitudes(samples: &[f64]) -> PolarsResult<Vec<f64>> {
 /// bin sums all samples, so one NaN yields an all-NaN spectrum — invalid
 /// data stays visibly invalid rather than becoming missing.
 ///
-/// Scaling normalizes by S1 = Σw[n]; interior bins are doubled **in the
-/// power domain** to account for the discarded negative frequencies,
-/// while DC and Nyquist (which have no mirror bin) are not.
+/// Scaling normalizes by S1 = Σw[n]; interior bins are doubled **in
+/// each scaling's own domain** (×2 amplitude, ×2 power) to account for
+/// the discarded negative frequencies, while DC and Nyquist (which
+/// have no mirror bin) are not.
 pub(crate) fn compute_fft(
     signal: &[f64],
     sample_rate: f64,

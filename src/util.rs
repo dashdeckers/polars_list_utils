@@ -173,25 +173,35 @@ pub(crate) struct ListInputs<T> {
 }
 
 impl ListInputs<f64> {
-    pub(crate) fn new(inputs: &[Series]) -> PolarsResult<Self> {
-        Self::build(inputs, extract_row)
+    pub(crate) fn new(
+        inputs: &[Series],
+        name: &str,
+    ) -> PolarsResult<Self> {
+        Self::build(inputs, name, extract_row)
     }
 }
 
 impl ListInputs<Option<f64>> {
-    pub(crate) fn with_inner_nulls(inputs: &[Series]) -> PolarsResult<Self> {
-        Self::build(inputs, extract_row_nullable)
+    pub(crate) fn with_inner_nulls(
+        inputs: &[Series],
+        name: &str,
+    ) -> PolarsResult<Self> {
+        Self::build(inputs, name, extract_row_nullable)
     }
 }
 
 /// The broadcast length across inputs: length-1 inputs are literals,
-/// all others must agree.
-pub(crate) fn broadcast_len(lens: &[usize]) -> PolarsResult<usize> {
+/// all others must agree. `name` is the calling function, so the error
+/// is attributable in a pipeline with several plugin calls.
+pub(crate) fn broadcast_len(
+    lens: &[usize],
+    name: &str,
+) -> PolarsResult<usize> {
     let len = lens.iter().copied().filter(|&l| l != 1).max().unwrap_or(1);
     for &l in lens {
         polars_ensure!(
             l == len || l == 1,
-            ComputeError: "all inputs must have length {len} or 1 (got {l})"
+            ComputeError: "{name}: all inputs must have length {len} or 1 (got {l})"
         );
     }
     Ok(len)
@@ -200,6 +210,7 @@ pub(crate) fn broadcast_len(lens: &[usize]) -> PolarsResult<usize> {
 impl<T> ListInputs<T> {
     fn build(
         inputs: &[Series],
+        name: &str,
         extract: impl Fn(&Series) -> Option<Vec<T>>,
     ) -> PolarsResult<Self> {
         polars_ensure!(
@@ -220,7 +231,7 @@ impl<T> ListInputs<T> {
             .collect::<PolarsResult<Vec<Series>>>()?;
 
         let lens = cas.iter().map(|s| s.len()).collect::<Vec<_>>();
-        let len = broadcast_len(&lens)?;
+        let len = broadcast_len(&lens, name)?;
 
         let columns = cas
             .iter()
@@ -241,7 +252,8 @@ impl<T> ListInputs<T> {
     }
 
     /// All column values for row `i`, with length-1 inputs broadcast.
-    /// Returns `None` if any column is null (or empty) at this row.
+    /// Returns `None` if any column is null at this row; an empty list
+    /// is `Some(&[])`, judged by the caller's `allow_empty` policy.
     pub(crate) fn row(
         &self,
         i: usize,
@@ -281,7 +293,7 @@ pub(crate) fn apply_list_transform<F>(
 where
     F: Fn(&[&[f64]]) -> PolarsResult<Option<Vec<f64>>>,
 {
-    let li = ListInputs::new(inputs)?;
+    let li = ListInputs::new(inputs, name)?;
 
     let mut builder = ListPrimitiveChunkedBuilder::<Float64Type>::new(
         PlSmallStr::from(""),

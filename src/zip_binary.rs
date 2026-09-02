@@ -235,7 +235,7 @@ fn zip_binary(
         let right =
             TypedListInput::<bool>::boolean(&inputs[1], "zip_binary: right_column")?;
         let out = zip_container(left.container(), right.container())?;
-        let len = broadcast_len(&[left.n_rows(), right.n_rows()])?;
+        let len = broadcast_len(&[left.n_rows(), right.n_rows()], "zip_binary")?;
         let rows = (0..len)
             .map(|i| zip_row(left.row(i), right.row(i), |a, b| kleene(op, a, b)))
             .collect::<PolarsResult<Vec<_>>>()?;
@@ -245,7 +245,7 @@ fn zip_binary(
     let left = TypedListInput::<f64>::float(&inputs[0], "zip_binary: left_column")?;
     let right = TypedListInput::<f64>::float(&inputs[1], "zip_binary: right_column")?;
     let out = zip_container(left.container(), right.container())?;
-    let len = broadcast_len(&[left.n_rows(), right.n_rows()])?;
+    let len = broadcast_len(&[left.n_rows(), right.n_rows()], "zip_binary")?;
 
     if op.is_arithmetic() {
         let rows = (0..len)

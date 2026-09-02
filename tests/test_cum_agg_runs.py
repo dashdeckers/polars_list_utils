@@ -12,6 +12,13 @@ import polars_list_utils as polist
 
 NAN = float("nan")
 
+# polars changed two behaviors this suite touches: 1.44 fixed the
+# cum_min/cum_max fold-seed leak (agreeing with this library's prefix
+# rule) and flipped its min/max tie-break from first-wins to last-wins
+# (this library stays first-wins). Tests that compare against native
+# polars branch on this.
+PL_VERSION = tuple(int(p) for p in pl.__version__.split(".")[:2])
+
 AGGS = ["sum", "mean", "median", "std", "min", "max", "delta", "count"]
 
 INF = float("inf")
@@ -85,9 +92,24 @@ def two_pass_std(prefix: list[float]) -> float | None:
     return math.sqrt(variance) if variance == variance and variance >= 0 else NAN
 
 
+def first_wins_extreme(prefix: list[float], is_better) -> float:
+    """NaN-skipping min/max that keeps the FIRST of equal values —
+    the library's fixed tie-break (and polars' own through 1.43; 1.44
+    flipped polars to last-wins, so the oracle cannot lean on live
+    polars for these two without inheriting a moving tie-break)."""
+    acc = float("nan")
+    for x in prefix:
+        if math.isnan(acc):
+            acc = x
+        elif not math.isnan(x) and is_better(x, acc):
+            acc = x
+    return acc
+
+
 def vertical(agg: str, prefix: list[float]) -> float | int | None:
     """The vertical aggregation over a run prefix's non-null values,
-    with polars itself as the kernel (the deference doctrine)."""
+    with polars itself as the kernel wherever polars' answer is stable
+    across the supported versions."""
     s = pl.Series(prefix, dtype=pl.Float64)
     if agg == "sum":
         return s.sum()
@@ -95,9 +117,14 @@ def vertical(agg: str, prefix: list[float]) -> float | int | None:
         return len(prefix)  # prefix holds only non-null values
     if agg == "std":
         return two_pass_std(prefix)
+    if agg == "min":
+        return first_wins_extreme(prefix, lambda x, acc: x < acc)
+    if agg == "max":
+        return first_wins_extreme(prefix, lambda x, acc: x > acc)
     if agg == "delta":
-        mx, mn = s.max(), s.min()
-        return None if mx is None else mx - mn  # ty: ignore[unsupported-operator]
+        mx = first_wins_extreme(prefix, lambda x, acc: x > acc)
+        mn = first_wins_extreme(prefix, lambda x, acc: x < acc)
+        return mx - mn
     return getattr(s, agg)()
 
 
@@ -251,8 +278,11 @@ def test_median_matches_polars_at_extremes():
 
 @pytest.mark.parametrize("values", [[-0.0, 0.0], [0.0, -0.0], [-0.0, -0.0]])
 def test_signed_zero_ties_keep_the_first_value(values):
-    # polars' min/max keep the earlier of two values that compare equal;
-    # Rust's f64::min/max keep the later, which flips the sign of zero.
+    # The library's fixed tie-break: min/max/median keep the earlier of
+    # two values that compare equal, so a signed-zero tie keeps its
+    # first sign. (polars agreed through 1.43; 1.44 flipped its own
+    # min/max to last-wins. Rust's f64::min/max would also keep the
+    # later value.) The expectation is therefore stated directly.
     df = pl.DataFrame({"v": [values]}, schema={"v": pl.List(pl.Float64)})
     for agg in ["min", "max", "median"]:
         got = df.select(
@@ -260,25 +290,26 @@ def test_signed_zero_ties_keep_the_first_value(values):
                 "v", pl.lit([True] * len(values)), aggregation=agg  # ty: ignore[invalid-argument-type]
             ).alias("r")
         )["r"][0].to_list()
-        expected = [
-            getattr(pl.Series(values[:k], dtype=pl.Float64), agg)()
-            for k in range(1, len(values) + 1)
-        ]
+        # Every prefix's extreme (and two-element median) is its first
+        # element: the values all compare equal.
+        expected = [values[0]] * len(values)
         assert_row_matches(got, expected, f"{agg} {values}")
 
 
-def test_leading_infinity_also_deviates_from_native_cum_seed_leak():
-    # The native seed leak is not NaN-specific: cum_min/cum_max fold
-    # from -+f64::MAX and never replace the seed on a tie, so a leading
-    # infinity of the same sign leaks it too. The prefix rule gives the
-    # true infinity instead.
+def test_leading_infinity_follows_the_prefix_rule():
+    # The prefix rule gives the true leading infinity. Native polars
+    # through 1.43 leaked its fold seed there (the seed leak was
+    # tie-blind, not NaN-specific); 1.44 fixed it and agrees.
     df = pl.DataFrame({"v": [[INF, 1.0]]}, schema={"v": pl.List(pl.Float64)})
     got = df.select(
         polist.cum_agg_runs("v", pl.lit([True, True]), aggregation="min").alias("r")
     )["r"][0].to_list()
+    assert got == [INF, 1.0]
     native = pl.Series([INF, 1.0], dtype=pl.Float64).cum_min().to_list()
-    assert got[0] == INF
-    assert native[0] == pytest.approx(1.7976931348623157e308)
+    if PL_VERSION < (1, 44):
+        assert native[0] == pytest.approx(1.7976931348623157e308)
+    else:
+        assert native == got
 
 
 def test_leading_nan_follows_prefix_rule_not_polars_seed_leak():
@@ -490,11 +521,17 @@ def test_float32_accumulates_in_f64_and_rounds_once():
     got = df.select(
         polist.cum_agg_runs("v", pl.lit([True] * 3), aggregation="sum").alias("r")
     )["r"][0].to_list()
-    native = pl.Series(values, dtype=pl.Float32).cum_sum().to_list()
-    # polars overflows at the second step and never recovers; the f64
-    # accumulator stays in range and rounds back to a finite Float32.
-    assert math.isinf(native[1]) and math.isinf(native[2])
+    # This library's contract, version-independent: the f64 running
+    # value exceeds Float32 range only at the middle position, so the
+    # once-rounded output recovers to a finite value.
     assert math.isinf(got[1]) and got[2] == pytest.approx(3e38, rel=1e-6)
+    native = pl.Series(values, dtype=pl.Float32).cum_sum().to_list()
+    if PL_VERSION < (1, 44):
+        # polars accumulated step-wise in Float32: overflow was sticky.
+        assert math.isinf(native[1]) and math.isinf(native[2])
+    else:
+        # polars widened its accumulator and agrees.
+        assert math.isinf(native[1]) and native[2] == pytest.approx(3e38, rel=1e-6)
 
 
 @pytest.mark.parametrize("engine", ["in-memory", "streaming"])

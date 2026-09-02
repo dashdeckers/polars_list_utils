@@ -232,7 +232,7 @@ fn cum_agg_runs(
     let values = TypedListInput::<f64>::float(&inputs[0], "cum_agg_runs: value_column")?;
     let gates = TypedListInput::<bool>::boolean(&inputs[1], "cum_agg_runs: gate_column")?;
     let out = run_container(values.container(), gates.container())?;
-    let len = broadcast_len(&[values.n_rows(), gates.n_rows()])?;
+    let len = broadcast_len(&[values.n_rows(), gates.n_rows()], "cum_agg_runs")?;
 
     let mut rows: Vec<Option<Vec<Option<f64>>>> = Vec::with_capacity(len);
     for i in 0..len {

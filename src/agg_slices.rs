@@ -67,7 +67,7 @@ fn agg_slices(
 ) -> PolarsResult<Series> {
     let (_, value_inner) =
         require_float_inner(inputs[0].dtype(), "agg_slices: value_column")?;
-    let li = ListInputs::with_inner_nulls(inputs)?;
+    let li = ListInputs::with_inner_nulls(inputs, "agg_slices")?;
 
     // No include ranges means include everything; excludes then carve it up.
     let mut slice = match kwargs.slices_include {

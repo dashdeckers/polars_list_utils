@@ -21,9 +21,11 @@ pub(crate) enum Aggregation {
 ///
 /// Every other aggregation yields null over nothing under either
 /// setting, and `count` yields 0 under either, so this switch reaches
-/// exactly one cell of the matrix. It applies to a selection that came
-/// out empty; a null row or an empty list never reaches this code,
-/// having already short-circuited to a null output row.
+/// exactly one cell of the matrix. It applies to any selection that
+/// came out empty — including a row whose lists were themselves empty,
+/// the limiting case of the same condition. Only a null row never
+/// reaches this code, having already short-circuited to a null output
+/// row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Empty {
@@ -56,8 +58,11 @@ impl Aggregation {
 }
 
 /// Running minimum that skips NaN and keeps the **first** of values
-/// that compare equal, as polars does. `f64::min` would return the
-/// later one, which flips the sign of a `-0.0`/`+0.0` tie.
+/// that compare equal — matching polars through 1.43 and this
+/// library's own stable-sorted `median`; polars 1.44 changed its own
+/// tie-break to last-wins, and this library stays fixed rather than
+/// tracking it (visible only in the sign of a `-0.0`/`+0.0` tie).
+/// `f64::min` would return the later value.
 pub(crate) fn min_fold(
     acc: f64,
     x: f64,
@@ -143,10 +148,10 @@ pub(crate) trait Statistic {
     }
 
     fn mean(&self) -> Option<f64> {
-        if self.is_empty() {
-            return None;
-        }
-        Some(self.values().iter().sum::<f64>() / self.values().len() as f64)
+        // Via `sum`, so the mean of an all-`-0.0` selection reads
+        // `+0.0` like everywhere else in the library -- a bare
+        // `Iterator::sum` folds from IEEE's `-0.0` identity.
+        Some(self.sum()? / self.values().len() as f64)
     }
 
     /// Sample standard deviation (ddof = 1), matching polars' default.

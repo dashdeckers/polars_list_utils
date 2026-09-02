@@ -67,12 +67,20 @@ def test_agg_slices_scalar_keeps_the_value_dtype(inner, agg):
 
 
 def test_agg_slices_float32_values_are_rounded_once():
-    # Computed in f64, cast at the boundary -- the value is the f64
-    # answer rounded, not an f32-accumulated one.
-    df = frame(pl.Float32)
+    # A fixture that discriminates: adding 1.0 to 2^24 in Float32 loses
+    # the 1.0 (the ulp at 2^24 is 2), so step-wise f32 accumulation and
+    # f64-then-round-once give different answers.
+    values = [16777216.0] + [1.0] * 8  # f64 sum 16777224 -> mean 1864136.0
+    idx = [float(i) for i in range(len(values))]
+    df = pl.DataFrame(
+        {"s": [values], "i": [idx]},
+        schema={"s": pl.List(pl.Float32), "i": pl.List(pl.Float32)},
+    )
     out = df.select(polist.agg_slices("s", "i", aggregation="mean").alias("r"))
-    expected = sum(SIGNAL32) / len(SIGNAL32)
-    assert out["r"][0] == pytest.approx(expected)
+    rounded_once = sum(values) / len(values)  # exactly representable
+    stepwise_f32 = 16777216.0 / len(values)  # what f32 accumulation gives
+    assert out["r"][0] == rounded_once
+    assert out["r"][0] != pytest.approx(stepwise_f32, rel=1e-9)
 
 
 # ------------------------------------------------------------- count dtype
@@ -83,6 +91,25 @@ def test_agg_slices_count_emits_uint32(inner):
     out = df.select(polist.agg_slices("s", "i", aggregation="count").alias("r"))
     assert out["r"].dtype == pl.UInt32
     assert out["r"][0] == 32
+
+
+@pytest.mark.parametrize("inner", [pl.Float32, pl.Float64])
+@pytest.mark.parametrize("empty", ["null", "zero"])
+def test_agg_lists_preserves_the_inner_dtype(inner, empty):
+    # agg_lists composes polars' own aggregations, which preserve the
+    # inner dtype natively -- but the declared output dtype flows from
+    # the pass-through plugin, so hardcoding it there must fail here.
+    df = pl.DataFrame(
+        {"g": [1, 1], "v": [[1.0, 2.0], [3.0, 4.0]]},
+        schema={"g": pl.Int64, "v": pl.List(inner)},
+    )
+    for agg in ["sum", "mean", "median", "std", "min", "max", "delta"]:
+        out = df.group_by("g").agg(
+            polist.agg_lists(
+                "v", list_length=2, aggregation=agg, empty=empty  # ty: ignore[invalid-argument-type]
+            ).alias("r")
+        )
+        assert out["r"].dtype == pl.List(inner), (agg, empty)
 
 
 def test_agg_lists_count_emits_uint32():
