@@ -250,8 +250,8 @@ def test_butterworth_short_rows_can_be_prefiltered():
         )
         .collect(engine="streaming")
     )
-    assert streamed.height == 1
-    assert streamed["f"][0] is not None
+    assert streamed.height == 1  # ty: ignore[unresolved-attribute]
+    assert streamed["f"][0] is not None  # ty: ignore[not-subscriptable]
 
 
 def test_butterworth_bandpass_short_list_raises():
