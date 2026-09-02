@@ -148,8 +148,9 @@ def apply_interp(
     and propagates into the output rather than raising — the check
     exists for the failure you cannot see, not the one you can.
 
-    Returns a `List[f64]` column of interpolated y values, one per
-    `xp` coordinate. Raises if x and y lists differ in length.
+    Returns one interpolated y value per `xp` coordinate, in the
+    container and inner dtype the paragraph above describes. Raises if
+    x and y lists differ in length.
     """
     return _plugin(
         "apply_interp",
@@ -179,7 +180,10 @@ def apply_butterworth(
     order samples (the reflection padding) raises — wrong shape is
     structural, not data; for an `Array` the width is in the schema and
     the raise lands at plan time, and for mixed-length `List` data the
-    escape hatch is pre-filtering with `list.len()`. Non-finite samples
+    escape hatch is pre-filtering with `list.len()` before this
+    transform (in a lazy query the optimizer pushes a later filter
+    below it, dropping offending rows before validation rather than
+    raising). Non-finite samples
     propagate and contaminate the filtered output rather than nulling
     it.
     """
@@ -206,7 +210,10 @@ def apply_fft(
     `[i * sample_rate / N for i in range(N // 2 + 1)]`. Signal lengths
     must be powers of two of at least 2 — a violation raises (for an
     `Array`, already at plan time, the width being in the schema; for
-    mixed-length `List` data, pre-filter with `list.len()`). Non-finite
+    mixed-length `List` data, pre-filter with `list.len()` *before*
+    this transform — in a lazy query, a filter written after it is
+    pushed below it by the optimizer, so offending rows are dropped
+    before validation rather than raising). Non-finite
     samples are legitimate floats and propagate: every bin sums all
     samples, so one NaN yields an all-NaN spectrum rather than a null
     row — invalid data stays visibly invalid instead of becoming

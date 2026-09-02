@@ -82,7 +82,9 @@ any input and broadcast it across rows. Anything structural raises instead of si
 returning nulls: invalid configuration (bad cutoffs, unknown window names), mismatched
 paired lengths, integer inner dtypes, and per-row shapes a transform cannot process — a
 non-power-of-two FFT length, a Butterworth signal shorter than its reflection padding, an
-empty list. For mixed-length List data the escape hatch is pre-filtering with `list.len()`.
+empty list. For mixed-length List data the escape hatch is pre-filtering with `list.len()`
+*before* the transform — in a lazy query the optimizer pushes a later filter below the
+transform, so offending rows are dropped before validation rather than raising.
 Only genuinely missing data nulls: a null row, or a null element inside a transform's
 signal.
 
@@ -143,11 +145,11 @@ It reaches exactly one cell of the matrix: `sum` is the only aggregation with a 
 identity, every other one yields null over nothing either way, and `count` yields 0 either
 way.
 
-The switch governs an empty *selection* — the lists held elements, but none was selected.
-A null row, and a row whose lists are themselves empty, stay null under both settings for
-every aggregation. So `empty="zero"` is not the same as `.fill_null(0.0)`: that cannot tell
-a missing row from an empty selection, and would turn a missing measurement into a real
-zero, which is the error this flag exists to avoid.
+The switch governs an empty *selection* — no index fell in range, or the lists were
+themselves empty, the limiting case of the same condition. A null row stays null under both
+settings for every aggregation, `count` included. So `empty="zero"` is not the same as
+`.fill_null(0.0)`: that cannot tell a missing row from an empty selection, and would turn a
+missing measurement into a real zero, which is the error this flag exists to avoid.
 
 The same philosophy sets the `strict` default. `apply_interp` verifies that `x` is
 non-decreasing, `agg_slices` rejects inverted or NaN range bounds at expression

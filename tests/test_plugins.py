@@ -52,18 +52,35 @@ def test_fft_spectrum_reads_mean_square():
 
 def test_fft_amplitude_squared_is_amplitude_squared():
     # Defined as amplitude^2 per bin, one-sided doubling squared along
-    # with it -- the quantity "power" used to be misread as.
-    df = pl.DataFrame({"s": [sine(25.0, amplitude=3.0)]}).with_columns(
+    # with it -- the quantity "power" used to be misread as. The DC
+    # offset matters: a zero-mean tone leaves the DC and Nyquist bins
+    # near 1e-15, where any default absolute tolerance would accept a
+    # wrong one-sided factor at exactly the two bins the doubling
+    # skips.
+    signal = [2.0 + v for v in sine(25.0, amplitude=3.0)]
+    df = pl.DataFrame({"s": [signal]}).with_columns(
         polist.apply_fft(
             "s", sample_rate=FS, window="hann", scaling="amplitude"
         ).alias("a"),
         polist.apply_fft(
             "s", sample_rate=FS, window="hann", scaling="amplitude_squared"
         ).alias("a2"),
+        polist.apply_fft(
+            "s", sample_rate=FS, window="hann", scaling="spectrum"
+        ).alias("sp"),
     )
     amp, amp2 = df["a"][0].to_list(), df["a2"][0].to_list()
     assert amp2 == pytest.approx([v * v for v in amp], rel=1e-12)
+    assert amp2[0] == pytest.approx(amp[0] ** 2, rel=1e-12)
+    assert amp2[-1] == pytest.approx(amp[-1] ** 2, rel=1e-12)
     assert amp2[peak_bin(25.0)] == pytest.approx(9.0, rel=1e-9)
+    assert amp2[0] == pytest.approx(4.0, rel=1e-9)  # the DC offset, squared
+    # And the documented wrinkle: spectrum == amplitude^2 / 2 at
+    # interior bins, but NOT at DC, where the doubling is absent from
+    # both scalings and the halving therefore has nothing to cancel.
+    sp = df["sp"][0].to_list()
+    assert sp[peak_bin(25.0)] == pytest.approx(amp2[peak_bin(25.0)] / 2.0, rel=1e-9)
+    assert sp[0] == pytest.approx(amp2[0], rel=1e-9)
 
 
 def test_fft_density_satisfies_parseval():
@@ -131,15 +148,16 @@ def test_fft_unknown_window_raises():
         )
 
 
-def test_fft_unknown_scaling_raises():
-    # "power" was the old name; after the rename to scipy's vocabulary
-    # it must be invalid, not quietly aliased.
+@pytest.mark.parametrize("old_name", ["power", "psd"])
+def test_removed_scaling_names_are_rejected(old_name):
+    # The old names must be invalid, not quietly aliased -- the
+    # ambiguous name disappearing is the point of the rename.
     with pytest.raises(polars.exceptions.PolarsError):
         pl.DataFrame({"s": [sine(25.0)]}).with_columns(
             polist.apply_fft(
                 "s",
                 sample_rate=FS,
-                scaling="power",  # ty: ignore[invalid-argument-type]
+                scaling=old_name,
             ).alias("a")
         )
 
@@ -215,13 +233,25 @@ def test_butterworth_short_list_raises():
 
 
 def test_butterworth_short_rows_can_be_prefiltered():
-    # The documented escape hatch for mixed-length List data.
+    # The documented escape hatch for mixed-length List data: filter
+    # upstream of the transform. Pinned in eager and streaming alike.
     df = pl.DataFrame({"s": [[1.0] * 12, sine(5.0)]})
     out = df.filter(pl.col("s").list.len() >= 13).with_columns(
         polist.apply_butterworth("s", sample_rate=FS, max_freq=20.0).alias("f")
     )
     assert out.height == 1
     assert out["f"][0] is not None
+
+    streamed = (
+        df.lazy()
+        .filter(pl.col("s").list.len() >= 13)
+        .with_columns(
+            polist.apply_butterworth("s", sample_rate=FS, max_freq=20.0).alias("f")
+        )
+        .collect(engine="streaming")
+    )
+    assert streamed.height == 1
+    assert streamed["f"][0] is not None
 
 
 def test_butterworth_bandpass_short_list_raises():

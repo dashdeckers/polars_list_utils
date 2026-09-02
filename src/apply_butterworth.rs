@@ -42,6 +42,11 @@ fn butterworth_output(
         ComputeError: "apply_butterworth: sample_rate must be positive, got {}",
         kwargs.sample_rate
     );
+    polars_ensure!(
+        kwargs.order() >= 1,
+        ComputeError: "apply_butterworth: filter_order must be at least 1, got {}",
+        kwargs.order()
+    );
     if let (Container::Array(w), Some(filter)) = (container, kwargs.filter()) {
         let min_samples = filter.min_samples(kwargs.order());
         polars_ensure!(
