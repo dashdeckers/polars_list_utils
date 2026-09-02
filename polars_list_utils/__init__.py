@@ -2,10 +2,12 @@
 
 Six elementwise Rust plugins, plus :func:`agg_lists`, which composes
 polars' own vertical aggregations (with a small pass-through plugin to
-prepare its input). The four original functions take `List[f64]`
-(anything numeric is cast to it); :func:`zip_binary` and
-:func:`cum_agg_runs` instead take float or Boolean inners as their
-operands require, and preserve `Float32`:
+prepare its input). Value-like inputs take `Float32` or `Float64`
+inners — anything else, integers included, raises at plan time naming
+the parameter — and `Float32` is preserved: kernels compute in `f64`
+and round once at the output boundary. The one exception to dtype
+preservation is `count`, which emits `UInt32`, polars' count dtype.
+Gates and the Boolean operands of `zip_binary` take Boolean inners:
 
 - :func:`apply_interp`: interpolate (x, y) data onto new x coordinates.
 - :func:`apply_butterworth`: zero-phase Butterworth filtering.
@@ -26,22 +28,27 @@ inputs that must agree element-for-element have their widths checked
 before execution when both are `Array`s, and per row otherwise. Two
 exceptions to container propagation: :func:`agg_slices` reduces to a
 scalar, and :func:`agg_lists` always returns a `List`, being an
-expression composition that never sees its input's schema. Zero-width `Array`s are rejected — polars panics when
-slicing them — while zero-length `List`s are fine.
+expression composition that never sees its input's schema. Zero-width
+`Array`s are rejected — polars panics when slicing them — while
+zero-length `List`s are fine.
 
 The plugins accept length-1 literal list columns (e.g. `pl.lit(...)`)
 for any input and broadcast them. Null rows produce null output rows.
 
-Missing data follows three deliberate family regimes:
-
-- Transforms (`apply_interp`, `apply_butterworth`, `apply_fft`) null
-  out rows whose lists are empty or contain null elements (a signal
-  with missing samples cannot be transformed).
-- Aggregations (`agg_slices`, `agg_lists`) skip missing data
-  polars-style; NaN is a legitimate float and flows through.
-- `zip_binary` and `cum_agg_runs` mirror polars' scalar and `cum_*`
-  operations per element: nulls propagate per those ops' rules, and
-  empty lists are valid (empty in, empty out).
+Data conditions follow three deliberate family regimes. A signal is
+atomic, so for the transforms (`apply_interp`, `apply_butterworth`,
+`apply_fft`) the rule is three lines: **missing data nulls** — a null
+row or any null element yields a null row, a signal with missing
+samples being untransformable; **invalid values propagate** — NaN and
+±inf are legitimate floats that flow through the arithmetic and stay
+visible in the output; **wrong shape raises** — a length the transform
+cannot process, including the empty list, is structural, not data.
+The aggregations (`agg_slices`, `agg_lists`) instead skip missing data
+polars-style, and treat an empty list as an empty selection. And
+`zip_binary`/`cum_agg_runs` mirror polars' scalar and `cum_*`
+operations per element: nulls propagate per those ops' rules, and
+empty lists are valid (empty in, empty out — total functions over zero
+elements).
 """
 
 import math
@@ -56,7 +63,7 @@ from polars_list_utils._internal import __version__ as __version__
 
 IntoExprColumn = str | pl.Expr | pl.Series
 Window = Literal["hann", "hanning", "blackman"]
-Scaling = Literal["amplitude", "power", "psd"]
+Scaling = Literal["amplitude", "amplitude_squared", "spectrum", "density"]
 Aggregation = Literal["sum", "mean", "median", "std", "min", "max", "delta", "count"]
 Empty = Literal["null", "zero"]
 
@@ -129,6 +136,11 @@ def apply_interp(
     values outside the data range clamped to the first/last `y` value.
     `x` must be sorted in increasing order.
 
+    Empty splits precisely: an empty `x`/`y` is no interpolant and
+    raises, while an empty `xp` is zero query points — a valid question
+    whose answer is an empty list. The output's container follows `xp`
+    and its inner dtype follows `y` (values determine the value dtype).
+
     With `strict=True` (the default) a row whose `x` values descend
     raises; duplicates stay legal, as in numpy. Pass `strict=False` for
     numpy's silent behaviour, where unsorted `x` interpolates garbage
@@ -163,8 +175,13 @@ def apply_butterworth(
     Filtering is bidirectional (like `scipy.signal.filtfilt`): zero
     phase lag, squared magnitude response, and the cutoff sits at -6 dB
     rather than -3 dB. Bandpass doubles the design order, as in
-    `scipy.signal.butter`. Rows with no more than 3x the effective
-    order samples (the reflection padding) yield null.
+    `scipy.signal.butter`. A row with no more than 3x the effective
+    order samples (the reflection padding) raises — wrong shape is
+    structural, not data; for an `Array` the width is in the schema and
+    the raise lands at plan time, and for mixed-length `List` data the
+    escape hatch is pre-filtering with `list.len()`. Non-finite samples
+    propagate and contaminate the filtered output rather than nulling
+    it.
     """
     return _plugin(
         "apply_butterworth",
@@ -187,17 +204,30 @@ def apply_fft(
 
     Emits `N/2 + 1` values from DC to Nyquist, so the frequency axis is
     `[i * sample_rate / N for i in range(N // 2 + 1)]`. Signal lengths
-    must be powers of two; rows violating that (or containing non-finite
-    values) yield null.
+    must be powers of two of at least 2 — a violation raises (for an
+    `Array`, already at plan time, the width being in the schema; for
+    mixed-length `List` data, pre-filter with `list.len()`). Non-finite
+    samples are legitimate floats and propagate: every bin sums all
+    samples, so one NaN yields an all-NaN spectrum rather than a null
+    row — invalid data stays visibly invalid instead of becoming
+    missing. Guard downstream thresholds with `is_finite()`.
 
-    Scaling conventions match scipy for a tone of peak amplitude A:
+    Scaling names are scipy's, for a tone of peak amplitude A:
 
     - `"amplitude"`: peak-amplitude spectrum, the tone reads A.
-    - `"power"`: power spectrum, the tone reads its mean-square A²/2
+    - `"amplitude_squared"`: `amplitude`² per bin, the tone reads A².
+      A convenience with no external anchor — elementwise squaring of a
+      list column is exactly the boilerplate this library removes.
+    - `"spectrum"`: power spectrum, the tone reads its mean-square A²/2
       (`scipy.signal.periodogram(scaling="spectrum")`).
-    - `"psd"`: power spectral density in unit²/Hz; integrates to the
-      signal's mean-square power (`scaling="density"`).
-    - `None`: raw FFT magnitudes.
+    - `"density"`: power spectral density in unit²/Hz; integrates to
+      the signal's mean-square power (`scaling="density"`).
+    - `None`: raw FFT magnitudes of the windowed signal.
+
+    The one-sided doubling happens in each scaling's own domain and
+    skips DC and Nyquist, so `spectrum != amplitude²/2` at exactly those
+    two bins — matching scipy. Windows are periodic (sym=False), as in
+    `periodogram`.
     """
     return _plugin(
         "apply_fft",
@@ -284,8 +314,9 @@ def agg_slices(
 
     Selects the elements of `value_column` whose corresponding element
     in `index_column` lies in any `slices_include` range and no
-    `slices_exclude` range, then aggregates them into a `Float64`.
-    Omitting `slices_include` includes everything.
+    `slices_exclude` range, then aggregates them into a scalar that
+    keeps the value column's inner dtype (`count` alone emits `UInt32`,
+    polars' count dtype). Omitting `slices_include` includes everything.
 
     Missing data follows the polars convention, so results follow
     polars' vertical aggregations over the same values (semantically —
@@ -300,9 +331,10 @@ def agg_slices(
     `std` is the sample standard deviation (ddof=1, polars' default)
     and yields null for selections with fewer than two values.
 
-    An empty selection — the lists held elements, but no index fell in
-    range — yields null, except `count`, which yields 0. `empty`
-    decides the one aggregation where the two conventions disagree:
+    An empty selection — no index fell in range, or the lists were
+    themselves empty, the limiting case of the same condition — yields
+    null, except `count`, which yields 0. `empty` decides the one
+    aggregation where the two conventions disagree:
 
     - `"null"` (default): summing nothing is unknown, not zero. An
       empty selection usually means a misconfigured range, and a real
@@ -311,11 +343,11 @@ def agg_slices(
     - `"zero"`: polars' convention, the identity element of addition,
       matching `explode().group_by().agg(col.filter(...).sum())`.
 
-    `empty` governs the empty *selection* only. A null row, and a row
-    whose lists are themselves empty, stay null under both settings for
-    every aggregation including `count` — so `empty="zero"` is not the
-    same as `.fill_null(0.0)`, which cannot tell a missing row from an
-    empty selection and would launder the former into a real zero.
+    `empty` governs the empty *selection* only. A null row stays null
+    under both settings for every aggregation including `count` — so
+    `empty="zero"` is not the same as `.fill_null(0.0)`, which cannot
+    tell a missing row from an empty selection and would launder the
+    former into a real zero.
 
     Range bounds accept anything `float()` converts, and the explicit
     form may be given as tuples or lists (so ranges loaded from JSON
@@ -347,7 +379,7 @@ _AGGS: dict[str, Callable[[pl.Expr], pl.Expr]] = {
     "min": pl.Expr.min,
     "max": pl.Expr.max,
     "delta": lambda e: e.max() - e.min(),
-    "count": lambda e: e.count().cast(pl.Float64),
+    "count": pl.Expr.count,  # UInt32, polars' count dtype
 }
 
 _AGGS_EMPTY_ZERO: dict[str, Callable[[pl.Expr], pl.Expr]] = {
@@ -388,8 +420,9 @@ def agg_lists(
 
     The aggregations are polars' own, so missing data follows the polars
     convention exactly as in :func:`agg_slices`: null elements are
-    skipped (`count` counts non-null values), NaN propagates per-kernel,
-    and `std` is the sample standard deviation (ddof=1). `empty` decides
+    skipped (`count` counts non-null values and emits `UInt32`, polars'
+    count dtype), NaN propagates per-kernel, and `std` is the sample
+    standard deviation (ddof=1). `empty` decides
     what an all-null position sums to — null by default, `0.0` under
     `empty="zero"` — exactly as in :func:`agg_slices`.
 

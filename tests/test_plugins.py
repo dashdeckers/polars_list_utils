@@ -42,30 +42,82 @@ def test_fft_hann_alias_matches_hanning():
     assert df["a"][0].to_list() == df["b"][0].to_list()
 
 
-def test_fft_power_reads_mean_square():
+def test_fft_spectrum_reads_mean_square():
     # scipy 'spectrum' convention: a tone of amplitude A reads A^2 / 2.
     df = pl.DataFrame({"s": [sine(25.0, amplitude=2.0)]}).with_columns(
-        polist.apply_fft("s", sample_rate=FS, scaling="power").alias("p")
+        polist.apply_fft("s", sample_rate=FS, scaling="spectrum").alias("p")
     )
     assert df["p"][0].to_list()[peak_bin(25.0)] == pytest.approx(2.0, rel=1e-9)
 
 
-def test_fft_psd_satisfies_parseval():
+def test_fft_amplitude_squared_is_amplitude_squared():
+    # Defined as amplitude^2 per bin, one-sided doubling squared along
+    # with it -- the quantity "power" used to be misread as.
+    df = pl.DataFrame({"s": [sine(25.0, amplitude=3.0)]}).with_columns(
+        polist.apply_fft(
+            "s", sample_rate=FS, window="hann", scaling="amplitude"
+        ).alias("a"),
+        polist.apply_fft(
+            "s", sample_rate=FS, window="hann", scaling="amplitude_squared"
+        ).alias("a2"),
+    )
+    amp, amp2 = df["a"][0].to_list(), df["a2"][0].to_list()
+    assert amp2 == pytest.approx([v * v for v in amp], rel=1e-12)
+    assert amp2[peak_bin(25.0)] == pytest.approx(9.0, rel=1e-9)
+
+
+def test_fft_density_satisfies_parseval():
     # For any signal, sum(PSD) * df == mean(x^2) exactly (no window).
     rng = np.random.default_rng(42)
     signal = list(rng.standard_normal(N))
     df = pl.DataFrame({"s": [signal]}).with_columns(
-        polist.apply_fft("s", sample_rate=FS, scaling="psd").alias("psd")
+        polist.apply_fft("s", sample_rate=FS, scaling="density").alias("psd")
     )
     integral = sum(df["psd"][0].to_list()) * FS / N
     assert integral == pytest.approx(float(np.mean(np.square(signal))), rel=1e-9)
 
 
-def test_fft_non_power_of_two_yields_null():
-    df = pl.DataFrame({"s": [[1.0] * 100]}).with_columns(
-        polist.apply_fft("s", sample_rate=FS).alias("a")
+def test_fft_non_power_of_two_raises():
+    # Wrong shape is structural, not data: previously a null row. The
+    # escape hatch for mixed-length List data is list.len() pre-filtering.
+    with pytest.raises(polars.exceptions.PolarsError, match="power-of-two"):
+        pl.DataFrame({"s": [[1.0] * 100]}).with_columns(
+            polist.apply_fft("s", sample_rate=FS).alias("a")
+        )
+
+
+def test_fft_length_one_raises():
+    # A length-1 signal IS a power of two, but the windows sum to zero
+    # on it; the raise is uniform across windows.
+    with pytest.raises(polars.exceptions.PolarsError, match="at least 2"):
+        pl.DataFrame({"s": [[5.0]]}).with_columns(
+            polist.apply_fft("s", sample_rate=FS, window="hann").alias("a")
+        )
+
+
+def test_fft_nan_row_yields_all_nan_spectrum():
+    # Invalid data propagates instead of becoming missing data: every
+    # bin sums all samples, so one NaN contaminates the whole spectrum.
+    signal = sine(25.0)
+    signal[100] = float("nan")
+    df = pl.DataFrame({"s": [signal]}).with_columns(
+        polist.apply_fft("s", sample_rate=FS, scaling="amplitude").alias("a")
     )
-    assert df["a"][0] is None
+    spectrum = df["a"][0].to_list()
+    assert spectrum is not None
+    assert all(math.isnan(v) for v in spectrum)
+
+
+def test_transform_empty_list_raises():
+    # The limiting case of too-short: a raise policy that softened as
+    # the input got worse would be indefensible.
+    df = pl.DataFrame({"s": [[]]}, schema={"s": pl.List(pl.Float64)})
+    with pytest.raises(polars.exceptions.PolarsError, match="empty"):
+        df.with_columns(polist.apply_fft("s", sample_rate=FS).alias("a"))
+    with pytest.raises(polars.exceptions.PolarsError, match="empty"):
+        df.with_columns(
+            polist.apply_butterworth("s", sample_rate=FS, max_freq=50.0).alias("a")
+        )
 
 
 def test_fft_unknown_window_raises():
@@ -80,12 +132,14 @@ def test_fft_unknown_window_raises():
 
 
 def test_fft_unknown_scaling_raises():
+    # "power" was the old name; after the rename to scipy's vocabulary
+    # it must be invalid, not quietly aliased.
     with pytest.raises(polars.exceptions.PolarsError):
         pl.DataFrame({"s": [sine(25.0)]}).with_columns(
             polist.apply_fft(
                 "s",
                 sample_rate=FS,
-                scaling="density",  # ty: ignore[invalid-argument-type]
+                scaling="power",  # ty: ignore[invalid-argument-type]
             ).alias("a")
         )
 
@@ -101,8 +155,12 @@ def test_fft_windowed_psd_enbw_identity():
     # For any signal and window, psd == power / enbw_hz elementwise;
     # the periodic hann window's ENBW is exactly 1.5 bins.
     df = pl.DataFrame({"s": [sine(25.0)]}).with_columns(
-        polist.apply_fft("s", sample_rate=FS, window="hann", scaling="power").alias("pow"),
-        polist.apply_fft("s", sample_rate=FS, window="hann", scaling="psd").alias("psd"),
+        polist.apply_fft(
+            "s", sample_rate=FS, window="hann", scaling="spectrum"
+        ).alias("pow"),
+        polist.apply_fft(
+            "s", sample_rate=FS, window="hann", scaling="density"
+        ).alias("psd"),
     )
     enbw_hz = 1.5 * FS / N
     power, psd = df["pow"][0].to_list(), df["psd"][0].to_list()
@@ -146,26 +204,35 @@ def test_butterworth_invalid_cutoff_raises():
         )
 
 
-def test_butterworth_short_list_yields_null():
-    # 12 samples equals the order-4 reflection padding, which used to
-    # panic inside the butterworth crate; must now be a null row.
-    df = pl.DataFrame({"s": [[1.0] * 12, sine(5.0)]}).with_columns(
+def test_butterworth_short_list_raises():
+    # 12 samples equals the order-4 reflection padding, which once
+    # panicked inside the butterworth crate and then yielded a null row;
+    # wrong shape is structural, so it now raises.
+    with pytest.raises(polars.exceptions.PolarsError, match="reflection padding"):
+        pl.DataFrame({"s": [[1.0] * 12, sine(5.0)]}).with_columns(
+            polist.apply_butterworth("s", sample_rate=FS, max_freq=20.0).alias("f")
+        )
+
+
+def test_butterworth_short_rows_can_be_prefiltered():
+    # The documented escape hatch for mixed-length List data.
+    df = pl.DataFrame({"s": [[1.0] * 12, sine(5.0)]})
+    out = df.filter(pl.col("s").list.len() >= 13).with_columns(
         polist.apply_butterworth("s", sample_rate=FS, max_freq=20.0).alias("f")
     )
-    assert df["f"][0] is None
-    assert df["f"][1] is not None
+    assert out.height == 1
+    assert out["f"][0] is not None
 
 
-def test_butterworth_bandpass_short_list_yields_null():
+def test_butterworth_bandpass_short_list_raises():
     # Bandpass doubles the design order, so order 4 pads with 24 samples;
-    # a 24-sample row is exactly the panic length and must yield null.
-    df = pl.DataFrame({"s": [[1.0] * 24, sine(25.0, n=32)]}).with_columns(
-        polist.apply_butterworth(
-            "s", sample_rate=FS, min_freq=10.0, max_freq=40.0
-        ).alias("f")
-    )
-    assert df["f"][0] is None
-    assert df["f"][1] is not None
+    # a 24-sample row is exactly the old panic length and must raise.
+    with pytest.raises(polars.exceptions.PolarsError, match="reflection padding"):
+        pl.DataFrame({"s": [[1.0] * 24, sine(25.0, n=32)]}).with_columns(
+            polist.apply_butterworth(
+                "s", sample_rate=FS, min_freq=10.0, max_freq=40.0
+            ).alias("f")
+        )
 
 
 def test_butterworth_order_zero_raises():
@@ -380,21 +447,27 @@ def test_empty_zero_is_not_fill_null():
     assert out["filled"].to_list() == [0.0, 0.0]
 
 
-def test_empty_list_rows_are_null_rows_under_both_settings():
-    # Today an empty list is a null row rather than an empty selection,
-    # so `empty` (and count's 0) cannot reach it. Spec section 7 changes
-    # this in the breaking pass; pin it until then so the divergence
-    # from agg_lists is deliberate rather than discovered.
+def test_empty_list_rows_are_empty_selections():
+    # An empty list is the limiting case of "no index fell in range":
+    # count reads 0, sum follows `empty`, everything else is null. This
+    # is what makes agg_slices and agg_lists give one answer to the same
+    # question, and Array(w=0) needs no special case only because it is
+    # rejected outright. (Previously an empty list was a null row, which
+    # neither `empty` nor count's 0 could reach.)
     df = pl.DataFrame(
         {"v": [[]], "i": [[]]},
         schema={"v": pl.List(pl.Float64), "i": pl.List(pl.Float64)},
     )
     out = df.select(
-        polist.agg_slices("v", "i", aggregation="sum", empty="zero").alias("sum"),
-        polist.agg_slices("v", "i", aggregation="count", empty="zero").alias("count"),
+        polist.agg_slices("v", "i", aggregation="sum").alias("sum_null"),
+        polist.agg_slices("v", "i", aggregation="sum", empty="zero").alias("sum_zero"),
+        polist.agg_slices("v", "i", aggregation="count").alias("count"),
+        polist.agg_slices("v", "i", aggregation="mean").alias("mean"),
     )
-    assert out["sum"][0] is None
-    assert out["count"][0] is None
+    assert out["sum_null"][0] is None
+    assert out["sum_zero"][0] == 0.0
+    assert out["count"][0] == 0
+    assert out["mean"][0] is None
 
 
 @pytest.mark.parametrize("bad", ["nul", "Null", "zeroes", None, 0, ""])
@@ -621,11 +694,18 @@ def test_null_and_inner_null_rows_yield_null():
     assert df["a"][2] is None  # inner nulls must not silently misalign
 
 
-def test_integer_lists_are_accepted():
-    df = pl.DataFrame({"x": [[0, 1, 2]], "y": [[0, 10, 20]]}).with_columns(
+def test_integer_lists_raise():
+    # Previously accepted and silently cast to f64; integer support is
+    # deliberately out of scope, so the rejection is loud, at plan time,
+    # and names the parameter.
+    df = pl.DataFrame({"x": [[0, 1, 2]], "y": [[0, 10, 20]]})
+    with pytest.raises(polars.exceptions.PolarsError, match="Float32 or Float64"):
+        df.with_columns(polist.apply_interp("x", "y", pl.lit([1.5])).alias("yp"))
+    lf = df.lazy().with_columns(
         polist.apply_interp("x", "y", pl.lit([1.5])).alias("yp")
     )
-    assert df["yp"][0].to_list() == pytest.approx([15.0])
+    with pytest.raises(polars.exceptions.PolarsError, match="x_column"):
+        lf.collect_schema()
 
 
 def test_array_input_is_supported_not_aborting():

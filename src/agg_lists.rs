@@ -9,7 +9,7 @@
 //! `List`; and the wrapper cannot branch on dtype itself, because an
 //! expression is built before any schema is resolved.
 
-use crate::util::{Container, as_list};
+use crate::util::{Container, as_list, require_float_inner};
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
@@ -25,7 +25,7 @@ fn prepare_output(
     kwargs: PrepareKwargs,
 ) -> PolarsResult<Field> {
     let (container, inner) =
-        Container::split(input_fields[0].dtype(), "agg_lists: list_column")?;
+        require_float_inner(input_fields[0].dtype(), "agg_lists: list_column")?;
     // An Array's width is in the schema, so a mismatch against
     // list_length is decidable before execution (validation, not
     // inference: the signature does not fork on container).

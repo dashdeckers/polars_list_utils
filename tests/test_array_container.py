@@ -340,14 +340,20 @@ def test_cum_agg_runs_follows_the_value_column_not_both():
 @pytest.mark.parametrize(
     "inner", [pl.Int8, pl.Int16, pl.UInt8, pl.UInt16, pl.Int32, pl.Int64]
 )
-def test_narrow_integer_inners_do_not_panic(inner):
-    # polars gates the narrow integer dtypes behind cargo features, and
-    # reconstructs the Series across the FFI boundary before any of this
-    # library's code runs -- so a missing feature panics there, exactly
-    # as the Array dtype once did.
+def test_integer_inners_are_rejected_not_panicked(inner):
+    # Two layers guard this. polars gates the narrow integer dtypes
+    # behind cargo features and reconstructs the Series across the FFI
+    # boundary before any of this library's code runs -- a missing
+    # feature panics there, exactly as the Array dtype once did, which
+    # is why the crate compiles with dtype-full. Once visible, integers
+    # are then rejected by our own dtype rules: a clean typed error at
+    # plan time, never a panic.
     df = pl.DataFrame({"a": [[1, 2, 3, 4]]}, schema={"a": pl.List(inner)})
-    out = df.select(polist.agg_slices("a", "a", aggregation="sum").alias("r"))
-    assert out["r"][0] == 10.0
+    with pytest.raises(polars.exceptions.PolarsError) as excinfo:
+        df.select(polist.agg_slices("a", "a", aggregation="sum").alias("r"))
+    message = str(excinfo.value)
+    assert "Float32 or Float64" in message
+    assert "the plugin panicked" not in message
 
 
 @pytest.mark.parametrize(

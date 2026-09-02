@@ -122,50 +122,46 @@ pub(crate) fn restore(
     }
 }
 
-/// Output dtype for the transforms: `Float64` elements in the container
-/// `input_fields[from]` arrived in, whose width `width_of` maps (the FFT
-/// halves it; everything else preserves it).
-pub(crate) fn transform_output(
-    input_fields: &[Field],
-    from: usize,
+/// Split a `List`/`Array` dtype and require a float inner: `Float32` or
+/// `Float64`, anything else (ints included) raising with the parameter's
+/// name. The schema knows the inner dtype, so every output-type function
+/// routes its inputs through this and the rejection lands at plan time.
+pub(crate) fn require_float_inner(
+    dtype: &DataType,
     label: &str,
-    width_of: impl Fn(usize) -> usize,
-) -> PolarsResult<Field> {
-    let (container, _) = Container::split(input_fields[from].dtype(), label)?;
-    let out = match container {
-        Container::List => Container::List,
-        Container::Array(w) => Container::Array(width_of(w)),
-    };
-    Ok(Field::new(
-        PlSmallStr::from(""),
-        out.dtype(DataType::Float64),
-    ))
+) -> PolarsResult<(Container, DataType)> {
+    let (container, inner) = Container::split(dtype, label)?;
+    polars_ensure!(
+        matches!(inner, DataType::Float32 | DataType::Float64),
+        ComputeError: "{label} must have a Float32 or Float64 inner dtype, got {dtype}"
+    );
+    Ok((container, inner))
 }
 
 /// Extract one row's list as a `Vec<f64>`.
 ///
-/// Returns `None` (-> null output row) if the list is empty or contains
-/// null elements: dropping inner nulls would silently misalign this list
-/// against its paired columns.
+/// Returns `None` (-> null output row) if the list contains null
+/// elements: dropping inner nulls would silently misalign this list
+/// against its paired columns. Empty lists are kept — whether an empty
+/// list is valid is the caller's per-input policy, not an extraction
+/// question.
 fn extract_row(s: &Series) -> Option<Vec<f64>> {
-    let values: Option<Vec<f64>> = s.f64().ok()?.into_iter().collect();
-    values.filter(|v| !v.is_empty())
+    s.f64().ok()?.into_iter().collect()
 }
 
-/// Extract one row's list with inner nulls preserved.
-///
-/// Returns `None` (-> null output row) only if the list is empty.
+/// Extract one row's list with inner nulls preserved. An empty list is
+/// an empty selection, not a null row.
 fn extract_row_nullable(s: &Series) -> Option<Vec<Option<f64>>> {
-    let values: Vec<Option<f64>> = s.f64().ok()?.into_iter().collect();
-    (!values.is_empty()).then_some(values)
+    Some(s.f64().ok()?.into_iter().collect())
 }
 
 /// Pre-extracted list-column inputs with automatic literal broadcasting.
 ///
 /// Polars expression plugins receive `&[Series]` as-is from the engine,
 /// without broadcasting length-1 literals. This struct handles that
-/// uniformly: all inputs must be `List` columns with a numeric inner
-/// dtype (cast to f64), of either length N or length 1 (broadcast to N).
+/// uniformly: all inputs must be `List`/`Array` columns with a float
+/// inner dtype (computed in f64), of either length N or length 1
+/// (broadcast to N).
 ///
 /// [`ListInputs::new`] nulls out rows whose lists contain null elements
 /// (for transforms, where a missing sample invalidates the signal);
@@ -211,17 +207,14 @@ impl<T> ListInputs<T> {
             ComputeError: "expected at least one input"
         );
 
+        // A runtime backstop: each function's output-type function has
+        // already rejected non-float inners at plan time with the
+        // parameter's name.
         let list_f64 = DataType::List(Box::new(DataType::Float64));
         let cas = inputs
             .iter()
             .map(|s| {
-                let (_, inner) = Container::split(s.dtype(), "input")?;
-                polars_ensure!(
-                    inner.is_primitive_numeric(),
-                    ComputeError:
-                    "expected List or Array column with numeric inner dtype, got {}",
-                    s.dtype()
-                );
+                require_float_inner(s.dtype(), "input")?;
                 as_list(s)?.cast(&list_f64)
             })
             .collect::<PolarsResult<Vec<Series>>>()?;
@@ -265,12 +258,24 @@ impl<T> ListInputs<T> {
 ///
 /// The closure receives one `&[f64]` per input column (length-1
 /// literals broadcast) and returns `Ok(None)` to emit a null row, or
-/// `Err` to abort the whole query. Null input rows stay null. The result
-/// is restored to `out_container`, which the caller derives from
-/// whichever input governs the output shape.
+/// `Err` to abort the whole query. Null input rows stay null.
+///
+/// `allow_empty` is the per-input empty-list policy, one flag per
+/// input. An empty list where it is disallowed raises: it is the
+/// limiting case of too-short, and a raise policy that softened as the
+/// input got worse would be indefensible. (`apply_interp` allows an
+/// empty `xp` — zero query points is a valid question with an empty
+/// answer — while an empty `x`/`y` is no interpolant at all.)
+///
+/// The result is computed in `f64` and restored to `out_container` and
+/// `out_inner` at the exit boundary, both derived by the caller from
+/// whichever input governs the output.
 pub(crate) fn apply_list_transform<F>(
     inputs: &[Series],
+    name: &'static str,
+    allow_empty: &[bool],
     out_container: Container,
+    out_inner: &DataType,
     f: F,
 ) -> PolarsResult<Series>
 where
@@ -286,13 +291,34 @@ where
     );
 
     for i in 0..li.len() {
-        match li.row(i).map(|slices| f(&slices)).transpose()?.flatten() {
+        let row = match li.row(i) {
+            None => {
+                builder.append_null();
+                continue;
+            }
+            Some(slices) => slices,
+        };
+        for (slice, &allowed) in row.iter().zip(allow_empty) {
+            polars_ensure!(
+                allowed || !slice.is_empty(),
+                ComputeError:
+                "{name}: a row's list is empty; a transform needs at least one \
+                sample (pre-filter with list.len() to drop such rows)"
+            );
+        }
+        match f(&row)? {
             Some(result) => builder.append_slice(&result),
             None => builder.append_null(),
         }
     }
 
-    restore(builder.finish().into_series(), out_container)
+    let s = builder.finish().into_series();
+    let s = if *out_inner == DataType::Float64 {
+        s
+    } else {
+        s.cast(&DataType::List(Box::new(out_inner.clone())))?
+    };
+    restore(s, out_container)
 }
 
 /// One `List` input for the dtype-preserving entry layer used by

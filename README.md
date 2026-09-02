@@ -31,12 +31,15 @@ boost.
 - `polist.apply_fft`
     - Applies a (real) Fast Fourier Transform (FFT) to a List-type column of signal data,
       producing the `N/2 + 1` amplitudes from DC to Nyquist.
-    - Can pre-process the signals with a windowing function (e.g. Hann, Blackman).
-    - Can scale the amplitudes following the scipy conventions: `amplitude` reads a tone's peak
-      amplitude, `power` its mean-square (`scipy.signal.periodogram(scaling="spectrum")`), and
-      `psd` its power density (`scaling="density"`, integrates to the signal's mean-square power).
-    - The length of each signal must be a power of two, and the corresponding frequency axis
-      is given by `[i * sample_rate / N for i in range(N // 2 + 1)]`.
+    - Can pre-process the signals with a windowing function (e.g. Hann, Blackman), applied
+      in periodic (sym=False) form as in `scipy.signal.periodogram`.
+    - Scales the amplitudes under scipy's names: `amplitude` reads a tone's peak amplitude A,
+      `amplitude_squared` reads A² (the square of `amplitude`, a convenience), `spectrum` its
+      mean-square A²/2 (`scipy.signal.periodogram(scaling="spectrum")`), and `density` its
+      power density (`scaling="density"`, integrates to the signal's mean-square power).
+    - The length of each signal must be a power of two of at least 2 — a violation raises —
+      and the corresponding frequency axis is
+      `[i * sample_rate / N for i in range(N // 2 + 1)]`.
 
 - `polist.agg_slices`
     - Computes an aggregation of a range of y-values defined by some x-values for List-type columns.
@@ -75,9 +78,17 @@ boost.
     - `Float32` values stay `Float32`; `count` emits `UInt32` (Polars' count dtype).
 
 The six plugin functions accept a length-1 literal list column (e.g. `pl.lit([...])`) for
-any input and broadcast it across rows. Invalid configuration (bad cutoffs, unknown window
-names, mismatched list lengths) raises an error instead of silently returning nulls, while
-per-row data problems (e.g. a signal length that is not a power of two) yield null rows.
+any input and broadcast it across rows. Anything structural raises instead of silently
+returning nulls: invalid configuration (bad cutoffs, unknown window names), mismatched
+paired lengths, integer inner dtypes, and per-row shapes a transform cannot process — a
+non-power-of-two FFT length, a Butterworth signal shorter than its reflection padding, an
+empty list. For mixed-length List data the escape hatch is pre-filtering with `list.len()`.
+Only genuinely missing data nulls: a null row, or a null element inside a transform's
+signal.
+
+`Float32` columns stay `Float32` — kernels compute in `f64` and round once at the output
+boundary — with one exception: `count` emits `UInt32`, Polars' count dtype, everywhere it
+appears.
 
 Both aggregation functions support `sum`, `mean`, `median`, `std`, `min`, `max`, `delta`,
 and `count`, and both handle missing data like the vertical aggregations of Polars itself.
@@ -93,11 +104,13 @@ agree to rounding rather than bit-for-bit.)
 - `std` is the sample standard deviation (ddof=1) and yields null for fewer than two
   values, as in Polars.
 
-The three transforms instead turn any row with missing data (a null row, an empty list, or
-a list containing nulls) into a null output row: a signal with missing samples cannot be
-meaningfully transformed. `zip_binary` and `cum_agg_runs` mirror the corresponding scalar
-and cumulative Polars operations per element instead, and treat empty lists as valid
-(empty in, empty out).
+The three transforms instead follow a three-line rule: missing data nulls (a null row or
+a null element yields a null row — a signal with missing samples cannot be meaningfully
+transformed); invalid values propagate (NaN and ±inf flow through the arithmetic — one NaN
+yields an all-NaN spectrum, staying visibly invalid rather than becoming missing); wrong
+shape raises. For the aggregations an empty list is simply an empty selection, and
+`zip_binary` and `cum_agg_runs` mirror the corresponding scalar and cumulative Polars
+operations per element, treating empty lists as valid (empty in, empty out).
 
 ### List and Array
 
