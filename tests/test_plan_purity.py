@@ -70,6 +70,12 @@ def test_pipeline_streams_without_in_memory_fallback():
         text=True,
         env=env,
         timeout=120,
+        # Run from the tests directory, not the repo root: `python -c`
+        # prepends its CWD to sys.path, and at the repo root the source
+        # directory shadows the installed package -- which locally holds
+        # the maturin-develop .pyd but on CI has no compiled module at
+        # all, failing the import.
+        cwd=os.path.dirname(os.path.abspath(__file__)),
     )
     log = proc.stderr + proc.stdout
     assert proc.returncode == 0, log
