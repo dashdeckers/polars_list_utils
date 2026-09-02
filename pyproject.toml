@@ -3,8 +3,10 @@ name = "polars-list-utils"
 authors = [{ name="Travis Hammond", email="dashdeckers@gmail.com" }]
 description = "Signal-processing utilities for List columns in Polars"
 readme = "README.md"
+license = { file = "LICENSE" }
 dynamic = ["version"]
 classifiers = [
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: Implementation :: CPython",
